@@ -13,6 +13,7 @@ import json
 import time
 import logging
 import logging.handlers
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -89,6 +90,73 @@ class LoggerManager:
         root_logger.addHandler(file_handler)
 
 
+class CameraThread(threading.Thread):
+    """
+    Thread para gerenciar a conexão com uma câmera específica.
+    """
+    
+    def __init__(self, camera_id, camera_config):
+        """
+        Inicializa a thread para uma câmera.
+        
+        Args:
+            camera_id: ID da câmera
+            camera_config: Configuração da câmera
+        """
+        super().__init__(name=f"CameraThread-{camera_id}")
+        self.logger = logging.getLogger(__name__)
+        self.camera_id = camera_id
+        self.camera_config = camera_config
+        self.running = False
+        
+    def run(self):
+        """
+        Função principal da thread.
+        """
+        from camera_manager import CameraConnection
+        
+        self.logger.info(f"Thread da câmera {self.camera_id} iniciada")
+        self.running = True
+        
+        # Criar instância da câmera
+        camera = CameraConnection(self.camera_config)
+        
+        # Testar conexão até ter sucesso
+        connection_success = False
+        while self.running and not connection_success:
+            try:
+                self.logger.info(f"Testando conexão com a câmera {self.camera_id}...")
+                connection_success = camera.test_connection(timeout=3)
+                
+                if not connection_success:
+                    self.logger.warning(f"Falha na conexão com a câmera {self.camera_id}. Tentando novamente em 5 segundos...")
+                    time.sleep(5)
+            except Exception as e:
+                self.logger.error(f"Erro ao testar conexão com a câmera {self.camera_id}: {e}")
+                time.sleep(5)
+        
+        # Se a conexão foi bem-sucedida, tentar conectar à stream
+        if connection_success and self.running:
+            try:
+                self.logger.info(f"Estabelecendo conexão com a stream da câmera {self.camera_id}...")
+                stream_success = camera.try_connect_to_stream(timeout=5)
+                
+                if stream_success:
+                    self.logger.info(f"Conexão com a stream da câmera {self.camera_id} estabelecida com sucesso")
+                else:
+                    self.logger.warning(f"Falha ao conectar à stream da câmera {self.camera_id}")
+            except Exception as e:
+                self.logger.error(f"Erro ao conectar à stream da câmera {self.camera_id}: {e}")
+        
+        self.logger.info(f"Thread da câmera {self.camera_id} finalizada")
+    
+    def stop(self):
+        """
+        Para a execução da thread.
+        """
+        self.running = False
+
+
 class BuffetMonitoringSystem:
     """
     Classe principal do sistema de monitoramento de buffet.
@@ -110,6 +178,7 @@ class BuffetMonitoringSystem:
         self.running = False
         self.cuda_available = False
         self.vision_processor = None
+        self.camera_threads = []
         
         self.logger.info("Inicializando Sistema de Monitoramento de Buffet")
         
@@ -217,19 +286,13 @@ class BuffetMonitoringSystem:
             #     conf_threshold=0.5,
             #     iou_threshold=0.45
             # )
-
-            #Inicializar o monitor de status
-            self.logger.info("Inicializando sistema de monitoramento")
-            from monitoring import SystemMonitor, StatusTerminal
-            self.system_monitor = SystemMonitor(self.cameras_config)
-            self.status_terminal = StatusTerminal(self.system_monitor)
-            self.status_terminal.start()
-            self.logger.info("Sistema de monitoramento inicializado")
-
-            self.logger.info("Inicializando threads para o processamento de imagens")
-            # Inicializar outros componentes necessários
-            # ...
-
+            
+            # Iniciar threads para cada câmera
+            self.logger.info("Iniciando threads para cada câmera")
+            self.start_camera_threads()
+            
+            # Loop principal
+            self.logger.info("Sistema inicializado com sucesso. Pressione Ctrl+C para encerrar.")
             while self.running:
                 time.sleep(1)
                 
@@ -240,6 +303,27 @@ class BuffetMonitoringSystem:
             self.logger.exception(f"Erro crítico durante execução: {e}")
             self.stop()
             sys.exit(1)
+    
+    def start_camera_threads(self):
+        """
+        Inicia uma thread para cada câmera configurada.
+        """
+        self.logger.info(f"Iniciando {len(self.cameras_config['cameras'])} threads de câmera")
+        
+        for camera_config in self.cameras_config["cameras"]:
+            camera_id = camera_config["id"]
+            
+            # Criar e iniciar thread para esta câmera
+            thread = CameraThread(camera_id, camera_config)
+            thread.daemon = True  # Threads daemon terminam quando o programa principal termina
+            thread.start()
+            
+            # Adicionar à lista de threads
+            self.camera_threads.append(thread)
+            
+            self.logger.debug(f"Thread para câmera {camera_id} iniciada")
+        
+        self.logger.info("Todas as threads de câmera foram iniciadas")
     
     def stop(self):
         """
@@ -252,10 +336,17 @@ class BuffetMonitoringSystem:
         self.logger.info("Parando sistema de monitoramento")
         self.running = False
         
-        # Aqui seriam implementadas rotinas de finalização de cada módulo
-        # Por exemplo:
-        # self.camera_manager.close()
-        # self.api_client.close()
+        # Parar todas as threads de câmera
+        for thread in self.camera_threads:
+            if hasattr(thread, 'stop'):
+                thread.stop()
+        
+        # Aguardar todas as threads terminarem (com timeout)
+        for thread in self.camera_threads:
+            thread.join(timeout=2.0)
+        
+        # Limpar lista de threads
+        self.camera_threads.clear()
         
         self.logger.info("Sistema finalizado com sucesso")
 
