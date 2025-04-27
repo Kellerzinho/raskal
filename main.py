@@ -196,20 +196,6 @@ class BuffetMonitoringSystem:
             
             self.logger.info("Continuando após erro na verificação de CUDA")
     
-    def initialize_modules(self):
-        """
-        Verifica a disponibilidade dos módulos necessários para o sistema.
-        """
-        self.logger.info("Verificando disponibilidade dos módulos do sistema")
-        
-        try:
-            from modules import vision
-            self.logger.info("Todos os módulos verificados com sucesso")
-
-        except Exception as e:
-            self.logger.exception(f"Falha ao verificar módulos: {e}")
-            sys.exit(1)
-    
     def start(self):
         """
         Inicia o sistema de monitoramento.
@@ -222,22 +208,30 @@ class BuffetMonitoringSystem:
         self.running = True
         
         try:
-            
-            #Inicializar os módulos
-            self.initialize_modules()
-            
             # Inicializar o processador YOLO
             self.logger.info("Inicializando processador de visão computacional")
-            from modules.vision import YOLOProcessor
-            self.vision_processor = YOLOProcessor(
-                model_path="models/FVBM.pt", 
-                use_cuda=self.cuda_available,
-                conf_threshold=0.5,
-                iou_threshold=0.45
-            )
+            # from modules.vision import YOLOProcessor
+            # self.vision_processor = YOLOProcessor(
+            #     model_path="models/FVBM.pt", 
+            #     use_cuda=self.cuda_available,
+            #     conf_threshold=0.5,
+            #     iou_threshold=0.45
+            # )
+
+            #Inicializar o monitor de status
+            self.logger.info("Inicializando sistema de monitoramento")
+            from monitoring import SystemMonitor, StatusTerminal
+            self.system_monitor = SystemMonitor(self.cameras_config)
+            self.status_terminal = StatusTerminal(self.system_monitor)
+            self.status_terminal.start()
+            self.logger.info("Sistema de monitoramento inicializado")
+
             self.logger.info("Inicializando threads para o processamento de imagens")
             # Inicializar outros componentes necessários
             # ...
+
+            while self.running:
+                time.sleep(1)
                 
         except KeyboardInterrupt:
             self.logger.info("Interrupção de teclado detectada")
