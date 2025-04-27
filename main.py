@@ -92,22 +92,27 @@ class LoggerManager:
 
 class CameraThread(threading.Thread):
     """
-    Thread para gerenciar a conexão com uma câmera específica.
+    Thread para gerenciar a conexão com uma câmera específica e processar imagens usando visão computacional.
     """
     
-    def __init__(self, camera_id, camera_config):
+    def __init__(self, camera_id, camera_config, vision_processor=None):
         """
         Inicializa a thread para uma câmera.
         
         Args:
             camera_id: ID da câmera
             camera_config: Configuração da câmera
+            vision_processor: Processador de visão computacional (YOLOProcessor)
         """
         super().__init__(name=f"CameraThread-{camera_id}")
         self.logger = logging.getLogger(__name__)
         self.camera_id = camera_id
         self.camera_config = camera_config
         self.running = False
+        self.vision_processor = vision_processor
+        self.frame_count = 0
+        self.fps_limit = camera_config.get("max_fps", 15)
+        self.frame_interval = 1.0 / self.fps_limit
         
     def run(self):
         """
@@ -143,6 +148,12 @@ class CameraThread(threading.Thread):
                 
                 if stream_success:
                     self.logger.info(f"Conexão com a stream da câmera {self.camera_id} estabelecida com sucesso")
+                    
+                    # Processar frames da stream usando o modelo YOLO
+                    if self.vision_processor:
+                        self.process_stream(camera)
+                    else:
+                        self.logger.warning(f"Processador de visão não disponível para a câmera {self.camera_id}")
                 else:
                     self.logger.warning(f"Falha ao conectar à stream da câmera {self.camera_id}")
             except Exception as e:
@@ -150,11 +161,96 @@ class CameraThread(threading.Thread):
         
         self.logger.info(f"Thread da câmera {self.camera_id} finalizada")
     
+    def process_stream(self, camera):
+        """
+        Processa a stream de vídeo utilizando o modelo de visão computacional.
+        
+        Args:
+            camera: Instância da conexão com a câmera
+        """
+        self.logger.info(f"Iniciando processamento de stream da câmera {self.camera_id} com modelo YOLO")
+        
+        try:
+            # Abrir a stream usando OpenCV
+            cap = cv2.VideoCapture(camera.stream_url)
+            
+            if not cap.isOpened():
+                self.logger.error(f"Não foi possível abrir a stream da câmera {self.camera_id}")
+                return
+                
+            # Variáveis para controle de FPS
+            last_frame_time = time.time()
+            
+            # Loop de processamento enquanto a thread estiver rodando
+            while self.running:
+                # Controlar taxa de frames
+                current_time = time.time()
+                elapsed = current_time - last_frame_time
+                
+                if elapsed < self.frame_interval:
+                    # Esperar para respeitar o limite de FPS
+                    time.sleep(self.frame_interval - elapsed)
+                    continue
+                    
+                # Atualizar timestamp do último frame
+                last_frame_time = time.time()
+                
+                # Ler o próximo frame
+                ret, frame = cap.read()
+                
+                if not ret:
+                    self.logger.warning(f"Falha ao ler frame da câmera {self.camera_id}, tentando reconectar...")
+                    # Tentar reconectar
+                    cap.release()
+                    time.sleep(1)
+                    cap = cv2.VideoCapture(camera.stream_url)
+                    if not cap.isOpened():
+                        self.logger.error(f"Falha ao reconectar com a câmera {self.camera_id}")
+                        break
+                    continue
+                
+                # Incrementar contador de frames
+                self.frame_count += 1
+                
+                # Processar o frame com o modelo YOLO
+                try:
+                    # Processar imagem com o modelo
+                    results = self.vision_processor.model(frame)
+                    
+                    # Processar resultados (exemplo)
+                    detections = []
+                    for detection in results[0].boxes.data:
+                        x1, y1, x2, y2, confidence, class_id = detection
+                        if confidence > self.vision_processor.conf_threshold:
+                            detections.append({
+                                'class': results[0].names[int(class_id)],
+                                'confidence': float(confidence),
+                                'bbox': [float(x1), float(y1), float(x2), float(y2)]
+                            })
+                    
+                    # Registrar resultados (a cada 30 frames para não sobrecarregar o log)
+                    if self.frame_count % 30 == 0:
+                        self.logger.debug(f"Câmera {self.camera_id}: {len(detections)} detecções no frame {self.frame_count}")
+                    
+                    # Aqui você implementaria o processamento adicional das detecções
+                    # Por exemplo, verificar o nível de comida nos pratos e enviar alertas
+                    
+                except Exception as e:
+                    self.logger.error(f"Erro ao processar frame da câmera {self.camera_id} com YOLO: {e}")
+            
+            # Liberar recursos
+            cap.release()
+            self.logger.info(f"Processamento de stream da câmera {self.camera_id} finalizado")
+            
+        except Exception as e:
+            self.logger.exception(f"Erro durante processamento da stream da câmera {self.camera_id}: {e}")
+    
     def stop(self):
         """
         Para a execução da thread.
         """
         self.running = False
+
 
 
 class BuffetMonitoringSystem:
@@ -279,13 +375,13 @@ class BuffetMonitoringSystem:
         try:
             # Inicializar o processador YOLO
             self.logger.info("Inicializando processador de visão computacional")
-            # from modules.vision import YOLOProcessor
-            # self.vision_processor = YOLOProcessor(
-            #     model_path="models/FVBM.pt", 
-            #     use_cuda=self.cuda_available,
-            #     conf_threshold=0.5,
-            #     iou_threshold=0.45
-            # )
+            from vision import YOLOProcessor
+            self.vision_processor = YOLOProcessor(
+                model_path="models/FVBM.pt", 
+                use_cuda=self.cuda_available,
+                conf_threshold=0.5,
+                iou_threshold=0.45
+            )
             
             # Iniciar threads para cada câmera
             self.logger.info("Iniciando threads para cada câmera")
@@ -313,8 +409,8 @@ class BuffetMonitoringSystem:
         for camera_config in self.cameras_config["cameras"]:
             camera_id = camera_config["id"]
             
-            # Criar e iniciar thread para esta câmera
-            thread = CameraThread(camera_id, camera_config)
+            # Criar e iniciar thread para esta câmera, passando o processador de visão
+            thread = CameraThread(camera_id, camera_config, self.vision_processor)
             thread.daemon = True  # Threads daemon terminam quando o programa principal termina
             thread.start()
             

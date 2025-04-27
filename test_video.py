@@ -96,7 +96,7 @@ class VideoThread(threading.Thread):
     Thread para gerenciar a leitura de um arquivo de vídeo específico.
     """
     
-    def __init__(self, video_id, video_path, max_fps=15):
+    def __init__(self, video_id, video_path, max_fps=15, vision_processor=None):
         """
         Inicializa a thread para um vídeo.
         
@@ -104,6 +104,7 @@ class VideoThread(threading.Thread):
             video_id: ID do vídeo (equivalente ao ID da câmera)
             video_path: Caminho para o arquivo de vídeo
             max_fps: Taxa máxima de quadros por segundo
+            vision_processor: Processador de visão computacional
         """
         super().__init__(name=f"VideoThread-{video_id}")
         self.logger = logging.getLogger(__name__)
@@ -113,6 +114,7 @@ class VideoThread(threading.Thread):
         self.running = False
         self.current_frame = None
         self.frame_lock = threading.Lock()
+        self.vision_processor = vision_processor
         
     def run(self):
         """
@@ -161,6 +163,30 @@ class VideoThread(threading.Thread):
                 # Atualizar o frame atual
                 with self.frame_lock:
                     self.current_frame = frame.copy()
+                
+                # Processar frame com o modelo YOLO se disponível
+                if self.vision_processor:
+                    try:
+                        # Processar imagem com o modelo
+                        results = self.vision_processor.model(frame)
+                        
+                        # Processar resultados (exemplo)
+                        detections = []
+                        for detection in results[0].boxes.data:
+                            x1, y1, x2, y2, confidence, class_id = detection
+                            if confidence > self.vision_processor.conf_threshold:
+                                detections.append({
+                                    'class': results[0].names[int(class_id)],
+                                    'confidence': float(confidence),
+                                    'bbox': [float(x1), float(y1), float(x2), float(y2)]
+                                })
+                        
+                        # Log de detecções (limitado para não sobrecarregar o log)
+                        if len(detections) > 0:
+                            self.logger.debug(f"Vídeo {self.video_id}: {len(detections)} detecções encontradas")
+                    
+                    except Exception as e:
+                        self.logger.error(f"Erro ao processar frame com YOLO: {e}")
             
             # Liberar recursos ao finalizar
             cap.release()
@@ -305,8 +331,8 @@ class BuffetMonitoringSystemTest:
             else:
                 video_id = f"video{i+1}"
             
-            # Criar e iniciar thread para este vídeo
-            thread = VideoThread(video_id, video_path, max_fps=15)
+            # Criar e iniciar thread para este vídeo com o processador de visão
+            thread = VideoThread(video_id, video_path, max_fps=15, vision_processor=self.vision_processor)
             thread.daemon = True  # Threads daemon terminam quando o programa principal termina
             thread.start()
             
@@ -331,13 +357,13 @@ class BuffetMonitoringSystemTest:
         try:
             # Inicializar o processador YOLO
             self.logger.info("Inicializando processador de visão computacional")
-            # from vision import YOLOProcessor
-            # self.vision_processor = YOLOProcessor(
-            #     model_path="models/FVBM.pt", 
-            #     use_cuda=self.cuda_available,
-            #     conf_threshold=0.5,
-            #     iou_threshold=0.45
-            # )
+            from vision import YOLOProcessor
+            self.vision_processor = YOLOProcessor(
+                model_path="models/FVBM.pt", 
+                use_cuda=self.cuda_available,
+                conf_threshold=0.5,
+                iou_threshold=0.45
+            )
             
             # Iniciar threads para cada vídeo
             self.logger.info("Iniciando threads para cada vídeo")
