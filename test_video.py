@@ -113,8 +113,11 @@ class VideoThread(threading.Thread):
         self.max_fps = max_fps
         self.running = False
         self.current_frame = None
+        self.current_annotated_frame = None
         self.frame_lock = threading.Lock()
         self.vision_processor = vision_processor
+        self.detection_processor = None  # Será inicializado no método run
+        self.frame_processor = None      # Será inicializado no método run
         
     def run(self):
         """
@@ -122,6 +125,11 @@ class VideoThread(threading.Thread):
         """
         self.logger.info(f"Thread do vídeo {self.video_id} iniciada - Vídeo: {self.video_path}")
         self.running = True
+        
+        # Inicializar processadores
+        from processing import DetectionProcessor, FrameProcessor
+        self.detection_processor = DetectionProcessor(data_file="buffet_data.json")
+        self.frame_processor = FrameProcessor()
         
         try:
             # Tentar abrir o vídeo
@@ -143,6 +151,8 @@ class VideoThread(threading.Thread):
             
             # Loop para leitura dos frames
             last_frame_time = time.time()
+            frame_count = 0
+            
             while self.running:
                 # Controle de FPS
                 current_time = time.time()
@@ -160,6 +170,9 @@ class VideoThread(threading.Thread):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 
+                # Incrementar contador de frames
+                frame_count += 1
+                
                 # Atualizar o frame atual
                 with self.frame_lock:
                     self.current_frame = frame.copy()
@@ -167,26 +180,51 @@ class VideoThread(threading.Thread):
                 # Processar frame com o modelo YOLO se disponível
                 if self.vision_processor:
                     try:
-                        # Processar imagem com o modelo
+                        # 1. Processar imagem com o modelo YOLO
                         results = self.vision_processor.model(frame)
                         
-                        # Processar resultados (exemplo)
+                        # Extrair detecções do resultado do modelo
                         detections = []
                         for detection in results[0].boxes.data:
                             x1, y1, x2, y2, confidence, class_id = detection
                             if confidence > self.vision_processor.conf_threshold:
-                                detections.append({
-                                    'class': results[0].names[int(class_id)],
-                                    'confidence': float(confidence),
-                                    'bbox': [float(x1), float(y1), float(x2), float(y2)]
-                                })
+                                class_id_int = int(class_id)
+                                if class_id_int < len(results[0].names):
+                                    detections.append({
+                                        'class': results[0].names[class_id_int],
+                                        'confidence': float(confidence),
+                                        'bbox': [float(x1), float(y1), float(x2), float(y2)]
+                                    })
+                        
+                        # 2. Processar detecções (desenhar bounding boxes, calcular porcentagens)
+                        annotated_frame, stats = self.detection_processor.process_detections(
+                            self.video_id, frame, detections, track_max_area=True
+                        )
+                        
+                        # 3. Atualização do buffet_data.json é feita automaticamente dentro de process_detections
+                        
+                        # 4. Adicionar timestamp e informações visuais adicionais
+                        annotated_frame = self.frame_processor.add_timestamp(annotated_frame, self.video_id)
+                        
+                        # 5. Manter o frame processado para visualização
+                        with self.frame_lock:
+                            self.current_annotated_frame = annotated_frame
                         
                         # Log de detecções (limitado para não sobrecarregar o log)
-                        if len(detections) > 0:
-                            self.logger.debug(f"Vídeo {self.video_id}: {len(detections)} detecções encontradas")
+                        if frame_count % 30 == 0 or len(detections) > 0:
+                            self.logger.debug(f"Vídeo {self.video_id} - Frame {frame_count}: {len(detections)} detecções")
+                            
+                            # Mostrar estatísticas das classes detectadas
+                            if len(stats['classes']) > 0:
+                                classes_str = ", ".join([f"{k}: {v}" for k, v in stats['classes'].items()])
+                                self.logger.debug(f"Classes detectadas: {classes_str}")
+                            
+                            # Mostrar necessidades de reposição
+                            if stats['needs_refill']:
+                                self.logger.warning(f"Vídeo {self.video_id}: {len(stats['needs_refill'])} objetos precisam de reposição!")
                     
                     except Exception as e:
-                        self.logger.error(f"Erro ao processar frame com YOLO: {e}")
+                        self.logger.error(f"Erro ao processar frame com YOLO e DetetionProcessor: {e}")
             
             # Liberar recursos ao finalizar
             cap.release()
@@ -208,6 +246,18 @@ class VideoThread(threading.Thread):
                 return self.current_frame.copy()
         return None
     
+    def get_annotated_frame(self):
+        """
+        Obtém o frame atual com anotações (bounding boxes, etc.).
+        
+        Returns:
+            numpy.ndarray: Frame com anotações ou None se não houver frame disponível
+        """
+        with self.frame_lock:
+            if self.current_annotated_frame is not None:
+                return self.current_annotated_frame.copy()
+        return None
+    
     def stop(self):
         """
         Para a execução da thread.
@@ -221,9 +271,12 @@ class BuffetMonitoringSystemTest:
     Usa vídeos locais em vez de câmeras ESP32Cam.
     """
     
-    def __init__(self):
+    def __init__(self, show_visualization=True):
         """
         Inicializa o sistema de teste de monitoramento.
+        
+        Args:
+            show_visualization: Se True, mostra uma janela com os frames processados
         """
         # Inicializar o gerenciador de logs primeiro
         self.logger_manager = LoggerManager()
@@ -233,6 +286,8 @@ class BuffetMonitoringSystemTest:
         self.cuda_available = False
         self.vision_processor = None
         self.video_threads = []
+        self.show_visualization = show_visualization
+        self.visualization_thread = None
         
         # Lista de vídeos para teste
         self.VIDEO_PATHS = [
@@ -244,19 +299,7 @@ class BuffetMonitoringSystemTest:
             # Adicione mais caminhos de vídeos conforme necessário
         ]
         
-        self.logger.info("Inicializando Sistema de Teste com Vídeos para Monitoramento de Buffet")
-        
-        # Verificar existência do diretório de vídeos
-        videos_dir = Path("videos")
-        if not videos_dir.exists():
-            self.logger.warning(f"Diretório de vídeos não encontrado: {videos_dir}")
-            videos_dir.mkdir(exist_ok=True)
-            self.logger.info(f"Diretório de vídeos criado: {videos_dir}")
-        
-        # Verificar disponibilidade de CUDA
-        self.check_cuda()
-        
-        self.logger.debug("Sistema de teste inicializado com sucesso")
+        self.logger.info("Inicializando Sistema de Teste com Vídeos para Monitoramento de Buffet")        
     
     def check_cuda(self):
         """
@@ -311,37 +354,99 @@ class BuffetMonitoringSystemTest:
             self.logger.info("Continuando após erro na verificação de CUDA")
     
     def start_video_threads(self):
+            """
+            Inicia uma thread para cada vídeo configurado.
+            """
+            self.logger.info(f"Iniciando {len(self.VIDEO_PATHS)} threads de vídeo")
+            
+            for i, video_path in enumerate(self.VIDEO_PATHS):
+                video_path_obj = Path(video_path)
+                
+                if not video_path_obj.exists():
+                    self.logger.warning(f"Arquivo de vídeo não encontrado: {video_path}")
+                    continue
+                
+                # Extrair apenas o ID da câmera (camX) do nome do arquivo
+                filename = video_path_obj.name
+                parts = filename.split('_')
+                if len(parts) >= 2:
+                    video_id = parts[1]  # Obter "camX"
+                else:
+                    video_id = f"video{i+1}"
+                
+                # Criar e iniciar thread para este vídeo com o processador de visão
+                thread = VideoThread(video_id, video_path, max_fps=15, vision_processor=self.vision_processor)
+                thread.daemon = True  # Threads daemon terminam quando o programa principal termina
+                thread.start()
+                
+                # Adicionar à lista de threads
+                self.video_threads.append(thread)
+                
+                self.logger.debug(f"Thread para vídeo {video_id} iniciada")
+            
+            self.logger.info("Todas as threads de vídeo foram iniciadas")
+    
+    def start_visualization_thread(self):
         """
-        Inicia uma thread para cada vídeo configurado.
+        Inicia uma thread separada para visualização dos frames processados.
         """
-        self.logger.info(f"Iniciando {len(self.VIDEO_PATHS)} threads de vídeo")
-        
-        for i, video_path in enumerate(self.VIDEO_PATHS):
-            video_path_obj = Path(video_path)
+        if not self.show_visualization:
+            return
             
-            if not video_path_obj.exists():
-                self.logger.warning(f"Arquivo de vídeo não encontrado: {video_path}")
-                continue
+        self.visualization_thread = threading.Thread(
+            target=self.visualization_loop,
+            name="VisualizationThread"
+        )
+        self.visualization_thread.daemon = True
+        self.visualization_thread.start()
+        self.logger.info("Thread de visualização iniciada")
+    
+    def visualization_loop(self):
+        """
+        Loop principal da thread de visualização.
+        Mostra os frames processados de todas as câmeras em uma janela.
+        """
+        try:
+            from processing import FrameProcessor
+            frame_processor = FrameProcessor()
             
-            # Extrair apenas o ID da câmera (camX) do nome do arquivo
-            filename = video_path_obj.name
-            parts = filename.split('_')
-            if len(parts) >= 2:
-                video_id = parts[1]  # Obter "camX"
-            else:
-                video_id = f"video{i+1}"
+            self.logger.info("Loop de visualização iniciado")
             
-            # Criar e iniciar thread para este vídeo com o processador de visão
-            thread = VideoThread(video_id, video_path, max_fps=15, vision_processor=self.vision_processor)
-            thread.daemon = True  # Threads daemon terminam quando o programa principal termina
-            thread.start()
+            while self.running:
+                # Coletar frames processados de todas as threads ativas
+                frames = []
+                for thread in self.video_threads:
+                    if thread.is_alive():
+                        frame = thread.get_annotated_frame()
+                        if frame is not None:
+                            # Redimensionar para um tamanho uniforme
+                            frame = frame_processor.resize_frame(frame, target_width=480)
+                            frames.append(frame)
+                
+                if frames:
+                    # Combinar todos os frames em um grid
+                    combined_frame = frame_processor.concat_frames(frames)
+                    
+                    if combined_frame is not None:
+                        # Mostrar o frame combinado
+                        cv2.imshow("Buffet Monitoring System", combined_frame)
+                        
+                        # Processar teclas (ESC para sair)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == 27:  # ESC
+                            self.logger.info("Tecla ESC pressionada, encerrando visualização")
+                            self.stop()
+                            break
+                
+                # Pequeno delay para não sobrecarregar a CPU
+                time.sleep(0.05)
+                
+            # Fechar todas as janelas ao sair
+            cv2.destroyAllWindows()
+            self.logger.info("Visualização encerrada")
             
-            # Adicionar à lista de threads
-            self.video_threads.append(thread)
-            
-            self.logger.debug(f"Thread para vídeo {video_id} iniciada")
-        
-        self.logger.info("Todas as threads de vídeo foram iniciadas")
+        except Exception as e:
+            self.logger.exception(f"Erro na thread de visualização: {e}")
     
     def start(self):
         """
@@ -369,9 +474,25 @@ class BuffetMonitoringSystemTest:
             self.logger.info("Iniciando threads para cada vídeo")
             self.start_video_threads()
             
+            # Iniciar thread de visualização se necessário
+            if self.show_visualization:
+                self.start_visualization_thread()
+            
             # Loop principal
             self.logger.info("Sistema inicializado com sucesso. Pressione Ctrl+C para encerrar.")
+            
+            # Loop principal com exibição de estatísticas periódicas
+            stats_interval = 10  # segundos
+            last_stats_time = time.time()
+            
             while self.running:
+                current_time = time.time()
+                
+                # Mostrar estatísticas a cada intervalo definido
+                if current_time - last_stats_time >= stats_interval:
+                    self.show_statistics()
+                    last_stats_time = current_time
+                
                 time.sleep(1)
                 
         except KeyboardInterrupt:
@@ -381,6 +502,54 @@ class BuffetMonitoringSystemTest:
             self.logger.exception(f"Erro crítico durante execução: {e}")
             self.stop()
             sys.exit(1)
+    
+    def show_statistics(self):
+        """
+        Mostra estatísticas do sistema e carrega os dados mais recentes do arquivo JSON.
+        """
+        try:
+            from processing import DetectionProcessor
+            
+            # Tentar carregar os dados do arquivo JSON
+            processor = DetectionProcessor(data_file="buffet_data.json")
+            buffet_data = processor.load_area_data()
+            
+            # Estatísticas básicas
+            active_threads = sum(1 for t in self.video_threads if t.is_alive())
+            
+            self.logger.info(f"=== Estatísticas do Sistema ===")
+            self.logger.info(f"Threads ativas: {active_threads}/{len(self.video_threads)}")
+            
+            # Mostrar dados do arquivo JSON
+            if buffet_data:
+                camera_count = len(buffet_data)
+                total_objects = sum(len(objects) for objects in buffet_data.values())
+                
+                self.logger.info(f"Dados carregados de {camera_count} câmeras, {total_objects} objetos monitorados")
+                
+                # Listar câmeras/objetos com baixa porcentagem (que precisam de reposição)
+                needs_refill = []
+                for camera_id, objects in buffet_data.items():
+                    for object_id, data in objects.items():
+                        if data['percentage'] < 0.3:
+                            needs_refill.append({
+                                'camera': camera_id,
+                                'id': object_id,
+                                'class': data['class'],
+                                'percentage': data['percentage']
+                            })
+                
+                if needs_refill:
+                    self.logger.warning(f"{len(needs_refill)} objetos precisam de reposição!")
+                    for item in needs_refill[:3]:  # Mostrar apenas os 3 primeiros para não sobrecarregar o log
+                        self.logger.warning(f"  - {item['camera']}: {item['class']} ({item['percentage']*100:.1f}%)")
+                    if len(needs_refill) > 3:
+                        self.logger.warning(f"  ... e mais {len(needs_refill)-3} objetos")
+            
+            self.logger.info(f"===============================")
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao mostrar estatísticas: {e}")
     
     def stop(self):
         """
@@ -405,6 +574,9 @@ class BuffetMonitoringSystemTest:
         # Limpar lista de threads
         self.video_threads.clear()
         
+        # Fechar janelas OpenCV
+        cv2.destroyAllWindows()
+        
         self.logger.info("Sistema finalizado com sucesso")
 
 
@@ -412,8 +584,15 @@ def main():
     """
     Função principal para iniciar o sistema de teste.
     """
+    import argparse
+    
+    # Parse de argumentos de linha de comando
+    parser = argparse.ArgumentParser(description="Sistema de Monitoramento de Buffet - Teste com Vídeos")
+    parser.add_argument("--no-display", action="store_true", help="Desativa a visualização dos frames")
+    args = parser.parse_args()
+    
     # Criar e iniciar o sistema de teste
-    system = BuffetMonitoringSystemTest()
+    system = BuffetMonitoringSystemTest(show_visualization=not args.no_display)
     system.start()
 
 
