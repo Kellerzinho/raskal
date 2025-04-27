@@ -109,6 +109,7 @@ class BuffetMonitoringSystem:
         self.config_path = Path(config_path)
         self.running = False
         self.cuda_available = False
+        self.vision_processor = None
         
         self.logger.info("Inicializando Sistema de Monitoramento de Buffet")
         
@@ -197,27 +198,16 @@ class BuffetMonitoringSystem:
     
     def initialize_modules(self):
         """
-        Inicializa todos os módulos necessários para o sistema.
+        Verifica a disponibilidade dos módulos necessários para o sistema.
         """
-        self.logger.info("Inicializando módulos do sistema")
+        self.logger.info("Verificando disponibilidade dos módulos do sistema")
         
         try:
-            # Aqui seriam importados e inicializados os demais módulos
-            # De acordo com a estrutura do projeto
-            # Por exemplo:
-            # from modules.camera_connection import CameraManager
-            # from modules.vision import YoloProcessor
-            # etc.
-            from modules.vision import YOLOProcessor, FoodVolumeEstimator
-            
-            # Informar sobre o estado do CUDA para os módulos que utilizam GPU
-            # self.camera_manager = CameraManager(self.cameras_config)
-            # self.vision_processor = YoloProcessor(use_cuda=self.cuda_available)
-            # etc.
-            
-            self.logger.info("Todos os módulos inicializados com sucesso")
+            from modules import vision
+            self.logger.info("Todos os módulos verificados com sucesso")
+
         except Exception as e:
-            self.logger.exception(f"Falha ao inicializar módulos: {e}")
+            self.logger.exception(f"Falha ao verificar módulos: {e}")
             sys.exit(1)
     
     def start(self):
@@ -232,12 +222,23 @@ class BuffetMonitoringSystem:
         self.running = True
         
         try:
-            # Inicializar todos os módulos necessários
+            
+            #Inicializar os módulos
             self.initialize_modules()
             
-            # Iniciar processamento principal em loop
-            self.main_loop()
-            
+            # Inicializar o processador YOLO
+            self.logger.info("Inicializando processador de visão computacional")
+            from modules.vision import YOLOProcessor
+            self.vision_processor = YOLOProcessor(
+                model_path="models/FVBM.pt", 
+                use_cuda=self.cuda_available,
+                conf_threshold=0.5,
+                iou_threshold=0.45
+            )
+            self.logger.info("Inicializando threads para o processamento de imagens")
+            # Inicializar outros componentes necessários
+            # ...
+                
         except KeyboardInterrupt:
             self.logger.info("Interrupção de teclado detectada")
             self.stop()
@@ -245,35 +246,6 @@ class BuffetMonitoringSystem:
             self.logger.exception(f"Erro crítico durante execução: {e}")
             self.stop()
             sys.exit(1)
-    
-    def main_loop(self):
-        """
-        Loop principal de processamento do sistema.
-        """
-        self.logger.info("Iniciando loop principal de processamento")
-        
-        while self.running:
-            try:
-                # Aqui seria implementada a lógica principal de processamento
-                # Por exemplo:
-                # 1. Capturar imagens das câmeras
-                # 2. Processar as imagens com modelo YOLO
-                # 3. Analisar resultados e gerar métricas
-                # 4. Enviar dados para dashboard
-                # 5. Verificar comandos recebidos via API
-                
-                # Exemplo simplificado:
-                # frames = self.camera_manager.get_frames()
-                # results = self.vision_processor.process_frames(frames)
-                # metrics = self.metrics_analyzer.analyze(results)
-                # self.api_client.send_data(metrics)
-                
-                # Pausa para controle da taxa de processamento
-                time.sleep(0.1)
-                
-            except Exception as e:
-                self.logger.error(f"Erro durante processamento: {e}")
-                # Decidir se deve continuar ou parar baseado na gravidade do erro
     
     def stop(self):
         """
