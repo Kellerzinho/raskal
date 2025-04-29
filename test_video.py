@@ -299,6 +299,8 @@ class BuffetMonitoringSystemTest:
             # Adicione mais caminhos de vídeos conforme necessário
         ]
         
+        self.check_cuda()
+
         self.logger.info("Inicializando Sistema de Teste com Vídeos para Monitoramento de Buffet")        
     
     def check_cuda(self):
@@ -523,28 +525,27 @@ class BuffetMonitoringSystemTest:
             # Mostrar dados do arquivo JSON
             if buffet_data:
                 camera_count = len(buffet_data)
-                total_objects = sum(len(objects) for objects in buffet_data.values())
+                total_objects = sum(len(pratos) for pratos in buffet_data.values())
                 
-                self.logger.info(f"Dados carregados de {camera_count} câmeras, {total_objects} objetos monitorados")
+                self.logger.info(f"Dados carregados de {camera_count} câmeras, {total_objects} pratos monitorados")
                 
-                # Listar câmeras/objetos com baixa porcentagem (que precisam de reposição)
+                # Listar pratos com baixa porcentagem (que precisam de reposição)
                 needs_refill = []
-                for camera_id, objects in buffet_data.items():
-                    for object_id, data in objects.items():
+                for camera_id, pratos in buffet_data.items():
+                    for prato_name, data in pratos.items():
                         if data['percentage'] < 0.3:
                             needs_refill.append({
                                 'camera': camera_id,
-                                'id': object_id,
-                                'class': data['class'],
+                                'nome': prato_name,
                                 'percentage': data['percentage']
                             })
                 
                 if needs_refill:
-                    self.logger.warning(f"{len(needs_refill)} objetos precisam de reposição!")
+                    self.logger.warning(f"{len(needs_refill)} pratos precisam de reposição!")
                     for item in needs_refill[:3]:  # Mostrar apenas os 3 primeiros para não sobrecarregar o log
-                        self.logger.warning(f"  - {item['camera']}: {item['class']} ({item['percentage']*100:.1f}%)")
+                        self.logger.warning(f"  - {item['camera']}: {item['nome']} ({item['percentage']*100:.1f}%)")
                     if len(needs_refill) > 3:
-                        self.logger.warning(f"  ... e mais {len(needs_refill)-3} objetos")
+                        self.logger.warning(f"  ... e mais {len(needs_refill)-3} pratos")
             
             self.logger.info(f"===============================")
             
