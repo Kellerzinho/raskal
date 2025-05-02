@@ -18,6 +18,7 @@ import cv2
 from datetime import datetime
 from pathlib import Path
 from api_server import APIServer
+import dish_name_replacer
 
 
 class LoggerManager:
