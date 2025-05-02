@@ -1,6 +1,15 @@
 {
     "cameras": [
         {
+	    "restaurant": "rcna",
+            "id": "cam0",
+            "ip": "172.16.22.140",
+            "port": 81,
+            "location": "",
+            "max_fps": 15
+        },
+        {
+            "restaurant": "rcna",
             "id": "cam1",
             "ip": "172.16.22.141",
             "port": 81,
@@ -8,6 +17,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam2",
             "ip": "172.16.22.142",
             "port": 81,
@@ -15,6 +25,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam3",
             "ip": "172.16.22.143",
             "port": 81,
@@ -22,6 +33,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam4",
             "ip": "172.16.22.144",
             "port": 81,
@@ -29,6 +41,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam5",
             "ip": "172.16.22.145",
             "port": 81,
@@ -36,6 +49,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam6",
             "ip": "172.16.22.146",
             "port": 81,
@@ -43,6 +57,7 @@
             "max_fps": 15
         },
         {
+	    "restaurant": "rcna",
             "id": "cam7",
             "ip": "172.16.22.147",
             "port": 81,
@@ -50,6 +65,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam8",
             "ip": "172.16.22.148",
             "port": 81,
@@ -57,6 +73,7 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam9",
             "ip": "172.16.22.149",
             "port": 81,
@@ -64,8 +81,17 @@
             "max_fps": 15
         },
         {
+            "restaurant": "rcna",
             "id": "cam10",
             "ip": "172.16.22.150",
+            "port": 81,
+            "location": "",
+            "max_fps": 15
+        },
+        {
+            "restaurant": "rcna",
+            "id": "cam11",
+            "ip": "172.16.22.151",
             "port": 81,
             "location": "",
             "max_fps": 15

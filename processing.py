@@ -23,18 +23,21 @@ class DetectionProcessor:
     Classe para processar as detecções do modelo YOLO e calcular métricas.
     """
     
-    def __init__(self, data_file="buffet_data.json"):
+    def __init__(self, data_file="buffet_data.json", camera_config_file="config/cameras_novo.json"):
         """
         Inicializa o processador de detecções.
         
         Args:
             data_file: Caminho para o arquivo JSON onde os dados serão salvos
+            camera_config_file: Caminho para o arquivo de configuração das câmeras
         """
         self.logger = logging.getLogger(__name__)
         self.max_areas = {}  # Armazenar a área máxima para cada classe/ID de objeto
         self.max_areas_lock = Lock()  # Lock para acesso concorrente ao dicionário de áreas máximas
         self.data_file = data_file
         self.data_file_lock = Lock()  # Lock para acesso concorrente ao arquivo de dados
+        self.camera_config_file = camera_config_file
+        self.camera_info = self._load_camera_config()
         self.color_map = {
             # Cores para diferentes classes (RGB)
             # Pode ser personalizado conforme necessário
@@ -55,6 +58,35 @@ class DetectionProcessor:
         
         self.logger.debug("DetectionProcessor inicializado")
     
+    def _load_camera_config(self):
+        """
+        Carrega as informações de configuração das câmeras, incluindo o restaurant.
+        
+        Returns:
+            dict: Dicionário com informações das câmeras indexado por camera_id
+        """
+        camera_info = {}
+        try:
+            if os.path.exists(self.camera_config_file):
+                with open(self.camera_config_file, 'r') as f:
+                    camera_config = json.load(f)
+                    
+                for camera in camera_config.get('cameras', []):
+                    camera_id = camera.get('id')
+                    if camera_id:
+                        camera_info[camera_id] = {
+                            'restaurant': camera.get('restaurant', 'default'),
+                            'location': camera.get('location', ''),
+                            'ip': camera.get('ip', ''),
+                            'port': camera.get('port', 80)
+                        }
+            else:
+                self.logger.warning(f"Arquivo de configuração de câmeras não encontrado: {self.camera_config_file}")
+        except Exception as e:
+            self.logger.error(f"Erro ao carregar configuração das câmeras: {e}")
+            
+        return camera_info
+        
     def _init_data_file(self):
         """
         Inicializa o arquivo de dados JSON se ele não existir.
@@ -62,9 +94,9 @@ class DetectionProcessor:
         with self.data_file_lock:
             if not os.path.exists(self.data_file):
                 try:
-                    # Inicializar com a estrutura no formato de reposicao.json
+                    # Inicializar com a estrutura no formato de buffet_data_exemplo.json
                     initial_data = {
-                        "locations": []
+                        "address": []
                     }
                     with open(self.data_file, 'w') as f:
                         json.dump(initial_data, f, indent=4)
@@ -268,7 +300,7 @@ class DetectionProcessor:
     
     def save_area_percentage(self, camera_id, dish_id, dish_name, percentage):
         """
-        Salva a porcentagem de área para um prato no arquivo JSON no formato reposicao.json.
+        Salva a porcentagem de área para um prato no arquivo JSON no formato buffet_data_exemplo.json.
         
         Args:
             camera_id: ID da câmera/vídeo
@@ -290,23 +322,44 @@ class DetectionProcessor:
                             data = json.load(f)
                     except json.JSONDecodeError:
                         self.logger.error(f"Erro ao decodificar {self.data_file}, criando novo arquivo")
-                        data = {"locations": []}
+                        data = {"address": []}
                 
                 # Verificar se a estrutura básica existe
-                if "locations" not in data:
-                    data["locations"] = []
+                if "address" not in data:
+                    data["address"] = []
                 
-                # Verificar se a localização já existe
+                # Obter informações do restaurante para esta câmera
+                restaurant_id = "default"
+                if camera_id in self.camera_info:
+                    restaurant_id = self.camera_info[camera_id].get("restaurant", "default")
+                
+                # Verificar se o restaurante já existe
+                restaurant_index = None
+                for i, restaurant in enumerate(data["address"]):
+                    if restaurant.get("restaurant") == restaurant_id:
+                        restaurant_index = i
+                        break
+                
+                # Se o restaurante não existir, criar um novo
+                if restaurant_index is None:
+                    new_restaurant = {
+                        "restaurant": restaurant_id,
+                        "locations": []
+                    }
+                    data["address"].append(new_restaurant)
+                    restaurant_index = len(data["address"]) - 1
+                
+                # Verificar se a localização já existe dentro do restaurante
                 location_index = None
-                for i, location in enumerate(data["locations"]):
+                restaurant_locations = data["address"][restaurant_index].get("locations", [])
+                for i, location in enumerate(restaurant_locations):
                     if location.get("location_id") == camera_id:
                         location_index = i
                         break
                 
                 # Se a localização não existir, criar uma nova
                 if location_index is None:
-                    # Buscar o location_name do camera_config ou usar um padrão
-                    # Neste exemplo usaremos o camera_id como location_name
+                    # Buscar o location_name ou usar um padrão
                     location_name = self.get_location_name(camera_id)
                     
                     new_location = {
@@ -314,12 +367,17 @@ class DetectionProcessor:
                         "location_name": location_name,
                         "dishes": []
                     }
-                    data["locations"].append(new_location)
-                    location_index = len(data["locations"]) - 1
+                    
+                    # Garantir que a chave "locations" existe
+                    if "locations" not in data["address"][restaurant_index]:
+                        data["address"][restaurant_index]["locations"] = []
+                        
+                    data["address"][restaurant_index]["locations"].append(new_location)
+                    location_index = len(data["address"][restaurant_index]["locations"]) - 1
                 
                 # Verificar se o prato já existe na localização
                 dish_index = None
-                for i, dish in enumerate(data["locations"][location_index]["dishes"]):
+                for i, dish in enumerate(data["address"][restaurant_index]["locations"][location_index]["dishes"]):
                     if dish.get("dish_id") == dish_id:
                         dish_index = i
                         break
@@ -335,10 +393,10 @@ class DetectionProcessor:
                 
                 # Se o prato já existir, atualizá-lo
                 if dish_index is not None:
-                    data["locations"][location_index]["dishes"][dish_index] = dish_data
+                    data["address"][restaurant_index]["locations"][location_index]["dishes"][dish_index] = dish_data
                 else:
                     # Se não existir, adicioná-lo
-                    data["locations"][location_index]["dishes"].append(dish_data)
+                    data["address"][restaurant_index]["locations"][location_index]["dishes"].append(dish_data)
                 
                 # Salvar os dados atualizados
                 with open(self.data_file, 'w') as f:
@@ -380,11 +438,12 @@ class DetectionProcessor:
         
         return location_names.get(camera_id, f"Local {camera_id}")
     
-    def load_area_data(self, camera_id=None, dish_id=None):
+    def load_area_data(self, restaurant_id=None, camera_id=None, dish_id=None):
         """
         Carrega os dados de área do arquivo JSON.
         
         Args:
+            restaurant_id: ID do restaurante para filtrar (opcional)
             camera_id: ID da câmera para filtrar (opcional)
             dish_id: ID do prato para filtrar (opcional)
             
@@ -394,37 +453,62 @@ class DetectionProcessor:
         try:
             with self.data_file_lock:
                 if not os.path.exists(self.data_file):
-                    return {"locations": []}
+                    return {"address": []}
                     
                 with open(self.data_file, 'r') as f:
                     data = json.load(f)
                 
                 # Se não houver filtros, retornar todos os dados
-                if camera_id is None:
+                if restaurant_id is None and camera_id is None and dish_id is None:
                     return data
                 
-                # Filtrar por camera_id
-                filtered_data = {"locations": []}
-                for location in data.get("locations", []):
-                    if location.get("location_id") == camera_id:
-                        # Se não houver filtro de dish_id, retornar todos os pratos desta localização
+                # Filtrar por restaurant_id, camera_id e dish_id
+                filtered_data = {"address": []}
+                
+                for restaurant in data.get("address", []):
+                    # Se tiver filtro de restaurant_id e não for o restaurante correto, pular
+                    if restaurant_id is not None and restaurant.get("restaurant") != restaurant_id:
+                        continue
+                    
+                    # Criar cópia filtrada do restaurante
+                    filtered_restaurant = {"restaurant": restaurant.get("restaurant"), "locations": []}
+                    
+                    # Se não tiver filtro de camera_id, incluir todo o restaurante
+                    if camera_id is None and dish_id is None:
+                        filtered_restaurant["locations"] = restaurant.get("locations", [])
+                        filtered_data["address"].append(filtered_restaurant)
+                        continue
+                    
+                    # Filtrar por camera_id
+                    for location in restaurant.get("locations", []):
+                        # Se tiver filtro de camera_id e não for a localização correta, pular
+                        if camera_id is not None and location.get("location_id") != camera_id:
+                            continue
+                        
+                        # Se não tiver filtro de dish_id, incluir toda a localização
                         if dish_id is None:
-                            filtered_data["locations"].append(location)
-                        else:
-                            # Filtrar por dish_id
-                            filtered_location = location.copy()
-                            filtered_location["dishes"] = [
-                                dish for dish in location.get("dishes", [])
-                                if dish.get("dish_id") == dish_id
-                            ]
-                            if filtered_location["dishes"]:
-                                filtered_data["locations"].append(filtered_location)
+                            filtered_restaurant["locations"].append(location)
+                            continue
+                        
+                        # Filtrar por dish_id
+                        filtered_location = location.copy()
+                        filtered_location["dishes"] = [
+                            dish for dish in location.get("dishes", [])
+                            if dish.get("dish_id") == dish_id
+                        ]
+                        
+                        if filtered_location["dishes"]:
+                            filtered_restaurant["locations"].append(filtered_location)
+                    
+                    # Adicionar o restaurante filtrado se tiver localizações
+                    if filtered_restaurant["locations"]:
+                        filtered_data["address"].append(filtered_restaurant)
                 
                 return filtered_data
                 
         except Exception as e:
             self.logger.error(f"Erro ao carregar dados do arquivo JSON: {e}")
-            return {"locations": []}
+            return {"address": []}
     
     def clean_old_records(self, max_age_seconds=3600):
         """
@@ -449,44 +533,61 @@ class DetectionProcessor:
         if objects_to_remove:
             self.logger.debug(f"Removidos {len(objects_to_remove)} registros antigos")
     
-    def get_status_summary(self, camera_id=None):
+    def get_status_summary(self, restaurant_id=None, camera_id=None):
         """
         Obtém um resumo de status dos objetos rastreados.
         
         Args:
+            restaurant_id: Se fornecido, filtra apenas objetos deste restaurante
             camera_id: Se fornecido, filtra apenas objetos desta câmera
             
         Returns:
             dict: Resumo do status
         """
         # Carregar dados do arquivo JSON diretamente para usar a nova estrutura
-        data = self.load_area_data(camera_id)
+        data = self.load_area_data(restaurant_id, camera_id)
         
         summary = {
-            'total_locations': len(data.get("locations", [])),
+            'total_restaurants': len(data.get("address", [])),
+            'total_locations': 0,
             'total_dishes': 0,
+            'dishes_by_restaurant': {},
             'dishes_by_location': {},
             'needs_reposition': []
         }
         
         # Processar dados de acordo com a nova estrutura
-        for location in data.get("locations", []):
-            location_id = location.get("location_id")
-            dishes = location.get("dishes", [])
-            summary['total_dishes'] += len(dishes)
+        for restaurant in data.get("address", []):
+            restaurant_id = restaurant.get("restaurant")
+            locations = restaurant.get("locations", [])
+            summary['total_locations'] += len(locations)
             
-            # Contagem de pratos por localização
-            summary['dishes_by_location'][location_id] = len(dishes)
+            # Inicializar contagem de pratos para este restaurante
+            if restaurant_id not in summary['dishes_by_restaurant']:
+                summary['dishes_by_restaurant'][restaurant_id] = 0
             
-            # Verificar pratos que precisam de reposição
-            for dish in dishes:
-                if dish.get("needs_reposition", False):
-                    summary['needs_reposition'].append({
-                        'location_id': location_id,
-                        'dish_id': dish.get("dish_id"),
-                        'dish_name': dish.get("dish_name"),
-                        'percentage': dish.get("percentage_remaining", 0) / 100.0
-                    })
+            # Processar cada localização do restaurante
+            for location in locations:
+                location_id = location.get("location_id")
+                dishes = location.get("dishes", [])
+                summary['total_dishes'] += len(dishes)
+                
+                # Incrementar contagem de pratos para este restaurante
+                summary['dishes_by_restaurant'][restaurant_id] += len(dishes)
+                
+                # Contagem de pratos por localização
+                summary['dishes_by_location'][f"{restaurant_id}_{location_id}"] = len(dishes)
+                
+                # Verificar pratos que precisam de reposição
+                for dish in dishes:
+                    if dish.get("needs_reposition", False):
+                        summary['needs_reposition'].append({
+                            'restaurant': restaurant_id,
+                            'location_id': location_id,
+                            'dish_id': dish.get("dish_id"),
+                            'dish_name': dish.get("dish_name"),
+                            'percentage': dish.get("percentage_remaining", 0) / 100.0
+                        })
         
         return summary
 

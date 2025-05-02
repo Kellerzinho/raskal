@@ -626,6 +626,15 @@ class BuffetMonitoringSystem:
         """
         Inicia o sistema de monitoramento.
         """
+
+        try:
+            data_file = "buffet_data.json"
+            if os.path.exists(data_file):
+                os.remove(data_file)
+                self.logger.info(f"Arquivo {data_file} removido com sucesso")
+        except Exception as e:
+            self.logger.error(f"Erro ao remover arquivo buffet_data.json: {e}")
+
         if self.running:
             self.logger.warning("Sistema já está em execução")
             return
