@@ -23,7 +23,7 @@ class DetectionProcessor:
     Classe para processar as detecções do modelo YOLO e calcular métricas.
     """
     
-    def __init__(self, data_file="buffet_data.json", camera_config_file="config/cameras_novo.json"):
+    def __init__(self, data_file="buffet_data.json", camera_config_file="config/cameras.json"):
         """
         Inicializa o processador de detecções.
         
@@ -310,7 +310,7 @@ class DetectionProcessor:
         """
         timestamp = time.time()
         iso_timestamp = datetime.now().isoformat()
-        needs_reposition = percentage < 0.3
+        needs_reposition = percentage < 0.5
         
         try:
             with self.data_file_lock:

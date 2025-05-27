@@ -21,6 +21,7 @@ from api_server import APIServer
 import dish_name_replacer
 
 
+
 class LoggerManager:
     """
     Classe responsável por gerenciar a configuração do sistema de logging.
@@ -142,8 +143,8 @@ class CameraThread(threading.Thread):
         Esta função nunca encerra a thread enquanto running=True, 
         sempre retornando ao estágio de teste de conexão em caso de falha.
         """
-        from camera_manager import CameraConnection
-        
+        from netcam_connection import NetCamStudioConnection as CameraConnection
+
         self.logger.info(f"Thread da câmera {self.camera_id} iniciada")
         self.running = True
         
@@ -559,8 +560,8 @@ class BuffetMonitoringSystem:
             
             # Mostrar dados do arquivo JSON
             if buffet_data:
-                camera_count = len(buffet_data)
-                total_objects = sum(len(pratos) for pratos in buffet_data.values())
+                camera_count = len(buffet_data["address"])
+                total_objects = sum(len(pratos) for pratos in buffet_data["address"].values())
                 
                 self.logger.info(f"Dados carregados de {camera_count} câmeras, {total_objects} pratos monitorados")
                 

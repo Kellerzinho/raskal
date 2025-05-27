@@ -38,14 +38,16 @@ class CameraConnection:
         self.max_fps = camera_config["max_fps"]
         
         # URL para a stream HTTP
-        self.stream_url = f"http://{self.ip}:{self.port}/stream"
+        #"http://admin:admin@127.0.0.1:8100/Mjpeg/9"
+        self.stream_url = f"http://admin:admin@{self.ip}/Mjpeg/{self.port}"
         
         # Status da câmera
         self.connection_tested = False
         
         self.logger.debug(f"Câmera {self.camera_id} inicializada - IP: {self.ip}, Porta: {self.port}")
     
-    def try_connect_to_stream(self, timeout=20):
+    
+    def try_connect_to_stream(self, timeout=40):
         """
         Tenta conectar-se à stream HTTP da câmera.
         

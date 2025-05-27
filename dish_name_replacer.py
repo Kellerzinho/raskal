@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 import threading
 from functools import wraps
+import inspect
 
 
 class DishNameReplacer:
@@ -21,7 +22,7 @@ class DishNameReplacer:
     pelos nomes reais definidos em nomes.json.
     """
     
-    def __init__(self, names_file="nomes.json"):
+    def __init__(self, names_file="config/nomes.json"):
         """
         Inicializa o processador de substituição de nomes.
         
@@ -48,7 +49,20 @@ class DishNameReplacer:
         try:
             if not self.names_file.exists():
                 self.logger.warning(f"Arquivo de nomes não encontrado: {self.names_file}")
-                return
+                # Tentar procurar em caminhos alternativos
+                alternative_paths = [
+                    Path("nomes.json"),
+                    Path("../config/nomes.json"),
+                    Path("./config/nomes.json")
+                ]
+                
+                for alt_path in alternative_paths:
+                    if alt_path.exists():
+                        self.names_file = alt_path
+                        self.logger.info(f"Encontrado arquivo de nomes em caminho alternativo: {alt_path}")
+                        break
+                else:
+                    return  # Nenhum arquivo encontrado
                 
             with self.names_lock:
                 with open(self.names_file, 'r', encoding='utf-8') as f:
@@ -143,42 +157,31 @@ def patch_detection_processor():
         # Importar as classes necessárias
         from processing import DetectionProcessor
         
-        # Preservar o método original
-        original_save_json = None
-        
         # Criar o replacer
         replacer = DishNameReplacer()
         
-        # Definir a função de wrapper
-        def save_json_wrapper(original_method):
+        # Definir a função de wrapper para save_area_percentage
+        def save_area_percentage_wrapper(original_method):
             @wraps(original_method)
-            def wrapper(self, file_path, data):
-                # Substituir nomes antes de salvar
-                updated_data = replacer.replace_dish_names_in_data(data)
-                # Chamar o método original com os dados atualizados
-                return original_method(self, file_path, updated_data)
+            def wrapper(self, camera_id, dish_id, dish_name, percentage):
+                # Se o dish_name estiver no dicionário de nomes, usá-lo para exibição
+                if dish_name in replacer.dish_names:
+                    real_name = replacer.dish_names[dish_name]
+                    return original_method(self, camera_id, dish_id, real_name, percentage)
+                else:
+                    return original_method(self, camera_id, dish_id, dish_name, percentage)
             return wrapper
         
-        # Aplicar o monkey-patch na função que salva o JSON
-        if hasattr(DetectionProcessor, 'save_json_file'):
-            # Se o método existir com este nome
-            original_save_json = DetectionProcessor.save_json_file
-            DetectionProcessor.save_json_file = save_json_wrapper(original_save_json)
-            logging.getLogger(__name__).info("Patch aplicado ao método save_json_file da classe DetectionProcessor")
+        # Aplicar o patch ao método save_area_percentage
+        if hasattr(DetectionProcessor, 'save_area_percentage'):
+            original_method = DetectionProcessor.save_area_percentage
+            DetectionProcessor.save_area_percentage = save_area_percentage_wrapper(original_method)
+            logging.getLogger(__name__).info("Patch aplicado ao método save_area_percentage da classe DetectionProcessor")
+            return True
         else:
-            logging.getLogger(__name__).warning("Método save_json_file não encontrado, verificando alternativas...")
+            logging.getLogger(__name__).warning("Método save_area_percentage não encontrado na classe DetectionProcessor")
+            return False
             
-            # Tentar encontrar método que salva o JSON pela assinatura
-            for attr_name in dir(DetectionProcessor):
-                attr = getattr(DetectionProcessor, attr_name)
-                if callable(attr) and 'json.dump' in str(attr.__code__.co_consts):
-                    original_save_json = attr
-                    setattr(DetectionProcessor, attr_name, save_json_wrapper(original_save_json))
-                    logging.getLogger(__name__).info(f"Patch aplicado ao método {attr_name} da classe DetectionProcessor")
-                    break
-            
-        return original_save_json is not None
-        
     except ImportError as e:
         logging.getLogger(__name__).error(f"Não foi possível importar a classe DetectionProcessor: {e}")
         return False
