@@ -571,52 +571,69 @@ class BuffetMonitoringSystem:
     def show_statistics(self):
         """
         Mostra estatísticas do sistema e carrega os dados mais recentes do arquivo JSON.
+        CORRIGIDO: O método foi ajustado para parsear a estrutura hierárquica correta do buffet_data.json.
         """
         try:
             from processing import DetectionProcessor
             
-            # Tentar carregar os dados do arquivo JSON
-            # CORREÇÃO: Passa o mapa de informações para manter a consistência,
-            # embora aqui seja usado apenas para carregar dados.
+            # Tenta carregar os dados do arquivo JSON
             processor = DetectionProcessor(camera_info=self.camera_info_map, data_file="buffet_data.json")
             buffet_data = processor.load_area_data()
             
-            # Estatísticas básicas
+            # Estatísticas básicas das threads
             active_threads = sum(1 for t in self.camera_threads if t.is_alive())
             
-            self.logger.info(f"=== Estatísticas do Sistema ===")
+            self.logger.info("=== Estatísticas do Sistema ===")
             self.logger.info(f"Threads ativas: {active_threads}/{len(self.camera_threads)}")
             
-            # Mostrar dados do arquivo JSON
-            if buffet_data:
-                camera_count = len(buffet_data["address"])
-                total_objects = sum(len(pratos) for pratos in buffet_data["address"].values())
-                
-                self.logger.info(f"Dados carregados de {camera_count} câmeras, {total_objects} pratos monitorados")
-                
-                # Listar pratos com baixa porcentagem (que precisam de reposição)
+            # Verifica se há dados para processar
+            if buffet_data and buffet_data.get("address"):
+                # --- Início da Lógica Corrigida ---
+                location_count = 0
+                total_dishes = 0
                 needs_refill = []
-                for camera_id, pratos in buffet_data.items():
-                    for prato_name, data in pratos.items():
-                        if data['percentage'] < 0.3:
-                            needs_refill.append({
-                                'camera': camera_id,
-                                'nome': prato_name,
-                                'percentage': data['percentage']
-                            })
+
+                # Itera sobre a lista de restaurantes
+                for restaurant in buffet_data.get("address", []):
+                    locations = restaurant.get("locations", [])
+                    location_count += len(locations)
+                    
+                    # Itera sobre a lista de localizações (câmeras)
+                    for location in locations:
+                        dishes = location.get("dishes", [])
+                        total_dishes += len(dishes)
+                        
+                        # Itera sobre a lista de pratos em cada localização
+                        for dish in dishes:
+                            # A lógica em processing.py define 'needs_reposition' se a porcentagem é < 50%.
+                            if dish.get("needs_reposition", False):
+                                needs_refill.append({
+                                    'location': location.get("location_name", location.get("location_id")),
+                                    'name': dish.get("dish_name", "N/A"),
+                                    'percentage': dish.get("percentage_remaining", 0)
+                                })
+
+                self.logger.info(f"Dados carregados de {location_count} locais, {total_dishes} pratos monitorados.")
                 
                 if needs_refill:
                     self.logger.warning(f"{len(needs_refill)} pratos precisam de reposição!")
-                    for item in needs_refill[:3]:  # Mostrar apenas os 3 primeiros para não sobrecarregar o log
-                        self.logger.warning(f"  - {item['camera']}: {item['nome']} ({item['percentage']*100:.1f}%)")
-                    if len(needs_refill) > 3:
-                        self.logger.warning(f"  ... e mais {len(needs_refill)-3} pratos")
-            
-            self.logger.info(f"===============================")
+                    # Ordena por porcentagem para mostrar os mais críticos primeiro
+                    sorted_refill = sorted(needs_refill, key=lambda x: x['percentage'])
+                    
+                    # Mostra até 5 pratos para não sobrecarregar os logs
+                    for item in sorted_refill[:5]:
+                        self.logger.warning(f"  - {item['location']}: {item['name']} ({item['percentage']}%)")
+                    if len(needs_refill) > 5:
+                        self.logger.warning(f"  ... e mais {len(needs_refill)-5} pratos.")
+                # --- Fim da Lógica Corrigida ---
+            else:
+                self.logger.info("Arquivo de dados vazio ou sem informações de buffet.")
+
+            self.logger.info("===============================")
             
         except Exception as e:
             self.logger.error(f"Erro ao mostrar estatísticas: {e}")
-    
+
     def start_api_thread(self):
         """
         Inicia a thread de sincronização com a API externa.
