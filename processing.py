@@ -24,13 +24,15 @@ class DetectionProcessor:
     Modificada para consolidar área máxima entre câmeras do mesmo prato.
     """
     
-    def __init__(self, data_file="buffet_data.json", camera_config_file="config/cameras.json"):
+    # CORREÇÃO: O construtor agora recebe 'camera_info' em vez de ler do disco,
+    # reduzindo o acoplamento e I/O.
+    def __init__(self, camera_info, data_file="buffet_data.json"):
         """
         Inicializa o processador de detecções.
         
         Args:
+            camera_info: Dicionário com informações das câmeras indexado por camera_id
             data_file: Caminho para o arquivo JSON onde os dados serão salvos
-            camera_config_file: Caminho para o arquivo de configuração das câmeras
         """
         self.logger = logging.getLogger(__name__)
         
@@ -44,8 +46,7 @@ class DetectionProcessor:
         
         self.data_file = data_file
         self.data_file_lock = Lock()
-        self.camera_config_file = camera_config_file
-        self.camera_info = self._load_camera_config()
+        self.camera_info = camera_info # CORREÇÃO: Usando a informação passada
         
         self.color_map = {
             'food_tray': (0, 255, 0),
@@ -65,34 +66,9 @@ class DetectionProcessor:
         
         self.logger.debug("DetectionProcessor inicializado com consolidação de área máxima")
     
-    def _load_camera_config(self):
-        """
-        Carrega as informações de configuração das câmeras, incluindo o restaurant.
-        
-        Returns:
-            dict: Dicionário com informações das câmeras indexado por camera_id
-        """
-        camera_info = {}
-        try:
-            if os.path.exists(self.camera_config_file):
-                with open(self.camera_config_file, 'r') as f:
-                    camera_config = json.load(f)
-                    
-                for camera in camera_config.get('cameras', []):
-                    camera_id = camera.get('id')
-                    if camera_id:
-                        camera_info[camera_id] = {
-                            'restaurant': camera.get('restaurant', 'default'),
-                            'location': camera.get('location', ''),
-                            'ip': camera.get('ip', ''),
-                            'port': camera.get('port', 80)
-                        }
-            else:
-                self.logger.warning(f"Arquivo de configuração de câmeras não encontrado: {self.camera_config_file}")
-        except Exception as e:
-            self.logger.error(f"Erro ao carregar configuração das câmeras: {e}")
-            
-        return camera_info
+    # CORREÇÃO: Este método foi removido pois a classe não é mais responsável
+    # por carregar esta configuração.
+    # def _load_camera_config(self): ...
         
     def _init_data_file(self):
         """
@@ -846,7 +822,14 @@ if __name__ == "__main__":
     print("=== Teste do Módulo de Processamento ===")
     
     # Criar processadores
-    detection_processor = DetectionProcessor()
+    # CORREÇÃO: Para testar, precisaríamos de um 'camera_info' mockado.
+    mock_camera_info = {
+        "test": {
+            "restaurant": "mock_restaurant",
+            "location": "mock_location"
+        }
+    }
+    detection_processor = DetectionProcessor(camera_info=mock_camera_info)
     frame_processor = FrameProcessor()
     
     # Criar frame de teste

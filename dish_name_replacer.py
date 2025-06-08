@@ -14,6 +14,7 @@ from pathlib import Path
 import threading
 from functools import wraps
 import inspect
+import copy  # CORREÇÃO: Importado para deepcopy
 
 
 class DishNameReplacer:
@@ -136,15 +137,17 @@ class DishNameReplacer:
     
     def _deep_copy(self, obj):
         """
-        Cria uma cópia profunda de um objeto JSON.
+        Cria uma cópia profunda de um objeto.
         
         Args:
-            obj: Objeto JSON a ser copiado
+            obj: Objeto a ser copiado
             
         Returns:
             Cópia profunda do objeto
         """
-        return json.loads(json.dumps(obj))
+        # CORREÇÃO: Utilizando copy.deepcopy por ser mais idiomático e eficiente
+        # para objetos Python em geral, em vez de depender da serialização JSON.
+        return copy.deepcopy(obj)
 
 
 # Função para monkey-patch o método de salvamento da classe DetectionProcessor

@@ -107,7 +107,8 @@ class CameraThread(threading.Thread):
     Versão modificada que nunca encerra a thread, tentando continuamente reconectar.
     """
     
-    def __init__(self, camera_id, camera_config, vision_processor=None):
+    # CORREÇÃO: O construtor agora aceita 'camera_info_map' para injetar no DetectionProcessor.
+    def __init__(self, camera_id, camera_config, vision_processor=None, camera_info_map=None):
         """
         Inicializa a thread para uma câmera.
         
@@ -115,6 +116,7 @@ class CameraThread(threading.Thread):
             camera_id: ID da câmera
             camera_config: Configuração da câmera
             vision_processor: Processador de visão computacional (YOLOProcessor)
+            camera_info_map: Mapa com informações de todas as câmeras
         """
         super().__init__(name=f"CameraThread-{camera_id}")
         self.logger = logging.getLogger(__name__)
@@ -122,6 +124,7 @@ class CameraThread(threading.Thread):
         self.camera_config = camera_config
         self.running = False
         self.vision_processor = vision_processor
+        self.camera_info_map = camera_info_map # CORREÇÃO: Armazena o mapa
         self.frame_count = 0
         self.fps_limit = camera_config.get("max_fps", 15)
         self.frame_interval = 1.0 / self.fps_limit
@@ -150,7 +153,11 @@ class CameraThread(threading.Thread):
         
         # Inicializar processadores
         from processing import DetectionProcessor, FrameProcessor
-        self.detection_processor = DetectionProcessor(data_file="buffet_data.json")
+        # CORREÇÃO: Injeta o mapa de informações de câmera no DetectionProcessor.
+        self.detection_processor = DetectionProcessor(
+            camera_info=self.camera_info_map,
+            data_file="buffet_data.json"
+        )
         self.frame_processor = FrameProcessor()
         
         # Loop principal - permanece ativo enquanto self.running for True
@@ -365,6 +372,8 @@ class BuffetMonitoringSystem:
         self.visualization_thread = None
         self.api_thread = None
         self.api_server = None
+        self.cameras_config = {}
+        self.camera_info_map = {} # CORREÇÃO: Atributo para o mapa de câmeras
 
         # Configuração da API
         self.external_api_config = {
@@ -390,11 +399,23 @@ class BuffetMonitoringSystem:
         """
         try:
             # Carregar configuração das câmeras
-            with open(self.config_path / "cameras.json", "r") as f:
+            config_file = self.config_path / "cameras.json"
+            with open(config_file, "r") as f:
                 self.cameras_config = json.load(f)
                 self.logger.debug(f"Configuração de câmeras carregada: {len(self.cameras_config['cameras'])} câmeras encontradas")
-            
-            # Aqui seriam carregadas outras configurações necessárias
+
+            # CORREÇÃO: Criar o mapa de informações de câmera uma única vez.
+            # Este mapa será injetado em outros componentes, evitando que eles
+            # leiam o arquivo de configuração novamente.
+            for camera in self.cameras_config.get('cameras', []):
+                camera_id = camera.get('id')
+                if camera_id:
+                    self.camera_info_map[camera_id] = {
+                        'restaurant': camera.get('restaurant', 'default'),
+                        'location': camera.get('location', ''),
+                        'ip': camera.get('ip', ''),
+                        'port': camera.get('port', 80)
+                    }
             
         except FileNotFoundError as e:
             self.logger.error(f"Arquivo de configuração não encontrado: {e}")
@@ -530,7 +551,13 @@ class BuffetMonitoringSystem:
             camera_id = camera_config["id"]
             
             # Criar e iniciar thread para esta câmera
-            thread = CameraThread(camera_id, camera_config, self.vision_processor)
+            # CORREÇÃO: Passa o mapa de informações de todas as câmeras para a thread.
+            thread = CameraThread(
+                camera_id=camera_id, 
+                camera_config=camera_config, 
+                vision_processor=self.vision_processor,
+                camera_info_map=self.camera_info_map
+            )
             thread.daemon = True  # Threads daemon terminam quando o programa principal termina
             thread.start()
             
@@ -549,7 +576,9 @@ class BuffetMonitoringSystem:
             from processing import DetectionProcessor
             
             # Tentar carregar os dados do arquivo JSON
-            processor = DetectionProcessor(data_file="buffet_data.json")
+            # CORREÇÃO: Passa o mapa de informações para manter a consistência,
+            # embora aqui seja usado apenas para carregar dados.
+            processor = DetectionProcessor(camera_info=self.camera_info_map, data_file="buffet_data.json")
             buffet_data = processor.load_area_data()
             
             # Estatísticas básicas
