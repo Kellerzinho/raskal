@@ -3,8 +3,8 @@
 
 """
 Módulo de Processamento - Sistema de Monitoramento de Buffet
-Responsável pelo processamento das detecções do modelo YOLO,
-desenho de frames para visualização e cálculo de porcentagem de ocupação.
+Modificação simples: mesmos pratos de câmeras diferentes compartilham área máxima
+e apenas a câmera com maior porcentagem grava no JSON.
 """
 
 import logging
@@ -21,6 +21,7 @@ from datetime import datetime
 class DetectionProcessor:
     """
     Classe para processar as detecções do modelo YOLO e calcular métricas.
+    Modificada para consolidar área máxima entre câmeras do mesmo prato.
     """
     
     def __init__(self, data_file="buffet_data.json", camera_config_file="config/cameras.json"):
@@ -32,21 +33,27 @@ class DetectionProcessor:
             camera_config_file: Caminho para o arquivo de configuração das câmeras
         """
         self.logger = logging.getLogger(__name__)
-        self.max_areas = {}  # Armazenar a área máxima para cada classe/ID de objeto
-        self.max_areas_lock = Lock()  # Lock para acesso concorrente ao dicionário de áreas máximas
+        
+        # MODIFICAÇÃO 1: Áreas máximas por dish_name (não por object_id)
+        self.max_areas = {}  # Chave: dish_name, Valor: dados da área máxima
+        self.max_areas_lock = Lock()
+        
+        # MODIFICAÇÃO 2: Tracking de qual câmera tem a maior porcentagem para cada prato
+        self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
+        self.best_cameras_lock = Lock()
+        
         self.data_file = data_file
-        self.data_file_lock = Lock()  # Lock para acesso concorrente ao arquivo de dados
+        self.data_file_lock = Lock()
         self.camera_config_file = camera_config_file
         self.camera_info = self._load_camera_config()
+        
         self.color_map = {
-            # Cores para diferentes classes (RGB)
-            # Pode ser personalizado conforme necessário
-            'food_tray': (0, 255, 0),     # Verde para bandejas de comida
-            'empty_tray': (0, 0, 255),    # Vermelho para bandejas vazias
-            'low_food': (0, 165, 255),    # Laranja para pouca comida
-            'medium_food': (0, 255, 255), # Amarelo para comida média
-            'full_food': (0, 255, 0),     # Verde para comida cheia
-            'default': (255, 255, 255)    # Branco para classes não especificadas
+            'food_tray': (0, 255, 0),
+            'empty_tray': (0, 0, 255),
+            'low_food': (0, 165, 255),
+            'medium_food': (0, 255, 255),
+            'full_food': (0, 255, 0),
+            'default': (255, 255, 255)
         }
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.font_scale = 0.5
@@ -56,7 +63,7 @@ class DetectionProcessor:
         # Inicializar arquivo de dados se não existir
         self._init_data_file()
         
-        self.logger.debug("DetectionProcessor inicializado")
+        self.logger.debug("DetectionProcessor inicializado com consolidação de área máxima")
     
     def _load_camera_config(self):
         """
@@ -94,7 +101,6 @@ class DetectionProcessor:
         with self.data_file_lock:
             if not os.path.exists(self.data_file):
                 try:
-                    # Inicializar com a estrutura no formato de buffet_data_exemplo.json
                     initial_data = {
                         "address": []
                     }
@@ -139,7 +145,7 @@ class DetectionProcessor:
             confidence = detection.get('confidence', 0.0)
             bbox = detection.get('bbox', [0, 0, 0, 0])
             
-            # Calcular identificador único para este objeto
+            # ID para visualização local no frame
             object_id = f"{camera_id}_{class_name}_{i}"
             
             # Desenhar bounding box e informações
@@ -150,10 +156,10 @@ class DetectionProcessor:
             # Calcular área do objeto
             area = self.calculate_area(bbox)
             
-            # Atualizar área máxima se necessário
+            # MODIFICAÇÃO 3: Atualizar área máxima consolidada
             area_percentage = 0.0
             if track_max_area and area > 0:
-                area_percentage = self.update_max_area(object_id, class_name, area)
+                area_percentage = self.update_consolidated_max_area(class_name, camera_id, area)
                 
                 # Adicionar à lista de necessidade de reposição se a porcentagem for baixa
                 if area_percentage < 0.3:
@@ -171,9 +177,8 @@ class DetectionProcessor:
             
             stats['area_percentages'][object_id] = area_percentage
             
-            # Salvar dados no arquivo JSON
-            dish_id = f"{camera_id}_{class_name}"
-            self.save_area_percentage(camera_id, dish_id, class_name, area_percentage)
+            # MODIFICAÇÃO 4: Salvar apenas se esta câmera tem a maior porcentagem
+            self.save_if_best_camera(camera_id, class_name, area_percentage)
         
         return annotated_frame, stats
     
@@ -206,9 +211,9 @@ class DetectionProcessor:
         # Obter porcentagem de área se disponível
         percentage_text = ""
         with self.max_areas_lock:
-            if object_id in self.max_areas:
+            if class_name in self.max_areas:
                 area = self.calculate_area(bbox)
-                max_area = self.max_areas[object_id]['max_area']
+                max_area = self.max_areas[class_name]['max_area']
                 if max_area > 0:
                     percentage = min(area / max_area, 1.0) * 100
                     percentage_text = f" ({percentage:.1f}%)"
@@ -257,50 +262,81 @@ class DetectionProcessor:
         height = abs(y2 - y1)
         return width * height
     
-    def update_max_area(self, object_id, class_name, current_area):
+    def update_consolidated_max_area(self, dish_name, camera_id, current_area):
         """
-        Atualiza a área máxima registrada para um objeto e retorna a porcentagem atual.
+        Atualiza a área máxima consolidada para um prato (entre todas as câmeras)
+        e retorna a porcentagem atual.
         
         Args:
-            object_id: ID único do objeto
-            class_name: Nome da classe
+            dish_name: Nome do prato/classe
+            camera_id: ID da câmera atual
             current_area: Área atual do objeto
             
         Returns:
-            float: Porcentagem da área atual em relação à área máxima (0.0 a 1.0)
+            float: Porcentagem da área atual em relação à área máxima global (0.0 a 1.0)
         """
-        percentage = 1.0  # Valor padrão
+        percentage = 1.0
         
         with self.max_areas_lock:
-            # Se este objeto ainda não foi registrado
-            if object_id not in self.max_areas:
-                self.max_areas[object_id] = {
-                    'class': class_name,
+            # Se este prato ainda não foi registrado globalmente
+            if dish_name not in self.max_areas:
+                self.max_areas[dish_name] = {
                     'max_area': current_area,
                     'first_seen': time.time(),
                     'last_seen': time.time()
                 }
                 percentage = 1.0
+                self.logger.debug(f"Novo prato registrado: {dish_name} (área: {current_area})")
             else:
                 # Atualizar timestamp de última visualização
-                self.max_areas[object_id]['last_seen'] = time.time()
+                self.max_areas[dish_name]['last_seen'] = time.time()
                 
-                # Verificar se a área atual é maior que a máxima registrada
-                current_max = self.max_areas[object_id]['max_area']
+                # Verificar se a área atual é maior que a máxima global
+                current_max = self.max_areas[dish_name]['max_area']
                 
                 if current_area > current_max:
-                    # Atualizar área máxima
-                    self.max_areas[object_id]['max_area'] = current_area
+                    # Nova área máxima global encontrada!
+                    self.max_areas[dish_name]['max_area'] = current_area
                     percentage = 1.0
+                    self.logger.info(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
                 else:
-                    # Calcular porcentagem
+                    # Calcular porcentagem em relação à área máxima global
                     percentage = current_area / current_max if current_max > 0 else 1.0
+        
+        # MODIFICAÇÃO 5: Atualizar qual câmera tem a melhor porcentagem
+        with self.best_cameras_lock:
+            if dish_name not in self.best_cameras or percentage > self.best_cameras[dish_name]['percentage']:
+                self.best_cameras[dish_name] = {
+                    'camera_id': camera_id,
+                    'percentage': percentage,
+                    'timestamp': time.time()
+                }
         
         return percentage
     
+    def save_if_best_camera(self, camera_id, dish_name, percentage):
+        """
+        Salva os dados apenas se esta câmera tem a maior porcentagem para este prato.
+        
+        Args:
+            camera_id: ID da câmera atual
+            dish_name: Nome do prato
+            percentage: Porcentagem atual (0.0 a 1.0)
+        """
+        # Verificar se esta câmera é a melhor para este prato
+        is_best_camera = False
+        with self.best_cameras_lock:
+            if dish_name in self.best_cameras:
+                is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
+        
+        # MODIFICAÇÃO 6: Salvar apenas se for a melhor câmera
+        if is_best_camera:
+            dish_id = f"{camera_id}_{dish_name}"
+            self.save_area_percentage(camera_id, dish_id, dish_name, percentage)
+    
     def save_area_percentage(self, camera_id, dish_id, dish_name, percentage):
         """
-        Salva a porcentagem de área para um prato no arquivo JSON no formato buffet_data_exemplo.json.
+        Salva a porcentagem de área para um prato no arquivo JSON (ESTRUTURA ORIGINAL).
         
         Args:
             camera_id: ID da câmera/vídeo
@@ -359,7 +395,6 @@ class DetectionProcessor:
                 
                 # Se a localização não existir, criar uma nova
                 if location_index is None:
-                    # Buscar o location_name ou usar um padrão
                     location_name = self.get_location_name(camera_id)
                     
                     new_location = {
@@ -368,14 +403,19 @@ class DetectionProcessor:
                         "dishes": []
                     }
                     
-                    # Garantir que a chave "locations" existe
                     if "locations" not in data["address"][restaurant_index]:
                         data["address"][restaurant_index]["locations"] = []
                         
                     data["address"][restaurant_index]["locations"].append(new_location)
                     location_index = len(data["address"][restaurant_index]["locations"]) - 1
                 
-                # Verificar se o prato já existe na localização
+                # MODIFICAÇÃO 7: Remover prato existente com mesmo nome de outras câmeras
+                dishes = data["address"][restaurant_index]["locations"][location_index]["dishes"]
+                data["address"][restaurant_index]["locations"][location_index]["dishes"] = [
+                    dish for dish in dishes if dish.get("dish_name") != dish_name
+                ]
+                
+                # Verificar se o prato já existe nesta localização
                 dish_index = None
                 for i, dish in enumerate(data["address"][restaurant_index]["locations"][location_index]["dishes"]):
                     if dish.get("dish_id") == dish_id:
@@ -401,10 +441,6 @@ class DetectionProcessor:
                 # Salvar os dados atualizados
                 with open(self.data_file, 'w') as f:
                     json.dump(data, f, indent=4)
-                
-                # Log a cada X salvamentos para não sobrecarregar o log
-                if timestamp % 60 < 1:  # Aproximadamente uma vez por minuto
-                    self.logger.debug(f"Dados atualizados para {camera_id}/{dish_name}")
                     
         except Exception as e:
             self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}")
@@ -412,8 +448,6 @@ class DetectionProcessor:
     def get_location_name(self, camera_id):
         """
         Obtém o nome da localização com base no ID da câmera.
-        Esta função pode ser expandida para buscar o nome real da localização 
-        a partir de um arquivo de configuração.
         
         Args:
             camera_id: ID da câmera
@@ -421,8 +455,6 @@ class DetectionProcessor:
         Returns:
             str: Nome da localização
         """
-        # Para simplificar, usamos um mapeamento básico
-        # Em uma implementação real, isso poderia vir de uma configuração
         location_names = {
             "cam1": "Buffet Principal",
             "cam2": "Buffet de Entradas",
@@ -440,7 +472,7 @@ class DetectionProcessor:
     
     def load_area_data(self, restaurant_id=None, camera_id=None, dish_id=None):
         """
-        Carrega os dados de área do arquivo JSON.
+        Carrega os dados de área do arquivo JSON (ESTRUTURA ORIGINAL MANTIDA).
         
         Args:
             restaurant_id: ID do restaurante para filtrar (opcional)
@@ -462,35 +494,28 @@ class DetectionProcessor:
                 if restaurant_id is None and camera_id is None and dish_id is None:
                     return data
                 
-                # Filtrar por restaurant_id, camera_id e dish_id
+                # Aplicar filtros conforme a implementação original
                 filtered_data = {"address": []}
                 
                 for restaurant in data.get("address", []):
-                    # Se tiver filtro de restaurant_id e não for o restaurante correto, pular
                     if restaurant_id is not None and restaurant.get("restaurant") != restaurant_id:
                         continue
                     
-                    # Criar cópia filtrada do restaurante
                     filtered_restaurant = {"restaurant": restaurant.get("restaurant"), "locations": []}
                     
-                    # Se não tiver filtro de camera_id, incluir todo o restaurante
                     if camera_id is None and dish_id is None:
                         filtered_restaurant["locations"] = restaurant.get("locations", [])
                         filtered_data["address"].append(filtered_restaurant)
                         continue
                     
-                    # Filtrar por camera_id
                     for location in restaurant.get("locations", []):
-                        # Se tiver filtro de camera_id e não for a localização correta, pular
                         if camera_id is not None and location.get("location_id") != camera_id:
                             continue
                         
-                        # Se não tiver filtro de dish_id, incluir toda a localização
                         if dish_id is None:
                             filtered_restaurant["locations"].append(location)
                             continue
                         
-                        # Filtrar por dish_id
                         filtered_location = location.copy()
                         filtered_location["dishes"] = [
                             dish for dish in location.get("dishes", [])
@@ -500,7 +525,6 @@ class DetectionProcessor:
                         if filtered_location["dishes"]:
                             filtered_restaurant["locations"].append(filtered_location)
                     
-                    # Adicionar o restaurante filtrado se tiver localizações
                     if filtered_restaurant["locations"]:
                         filtered_data["address"].append(filtered_restaurant)
                 
@@ -518,24 +542,28 @@ class DetectionProcessor:
             max_age_seconds: Tempo máximo em segundos para manter registros inativos
         """
         current_time = time.time()
-        objects_to_remove = []
+        dishes_to_remove = []
         
         with self.max_areas_lock:
-            for object_id, data in self.max_areas.items():
+            for dish_name, data in self.max_areas.items():
                 last_seen = data['last_seen']
                 if current_time - last_seen > max_age_seconds:
-                    objects_to_remove.append(object_id)
+                    dishes_to_remove.append(dish_name)
             
-            # Remover objetos antigos
-            for object_id in objects_to_remove:
-                del self.max_areas[object_id]
+            for dish_name in dishes_to_remove:
+                del self.max_areas[dish_name]
+        
+        with self.best_cameras_lock:
+            for dish_name in dishes_to_remove:
+                if dish_name in self.best_cameras:
+                    del self.best_cameras[dish_name]
                 
-        if objects_to_remove:
-            self.logger.debug(f"Removidos {len(objects_to_remove)} registros antigos")
+        if dishes_to_remove:
+            self.logger.debug(f"Removidos {len(dishes_to_remove)} registros antigos")
     
     def get_status_summary(self, restaurant_id=None, camera_id=None):
         """
-        Obtém um resumo de status dos objetos rastreados.
+        Obtém um resumo de status dos objetos rastreados (MANTÉM COMPATIBILIDADE).
         
         Args:
             restaurant_id: Se fornecido, filtra apenas objetos deste restaurante
@@ -544,7 +572,6 @@ class DetectionProcessor:
         Returns:
             dict: Resumo do status
         """
-        # Carregar dados do arquivo JSON diretamente para usar a nova estrutura
         data = self.load_area_data(restaurant_id, camera_id)
         
         summary = {
@@ -556,29 +583,22 @@ class DetectionProcessor:
             'needs_reposition': []
         }
         
-        # Processar dados de acordo com a nova estrutura
         for restaurant in data.get("address", []):
             restaurant_id = restaurant.get("restaurant")
             locations = restaurant.get("locations", [])
             summary['total_locations'] += len(locations)
             
-            # Inicializar contagem de pratos para este restaurante
             if restaurant_id not in summary['dishes_by_restaurant']:
                 summary['dishes_by_restaurant'][restaurant_id] = 0
             
-            # Processar cada localização do restaurante
             for location in locations:
                 location_id = location.get("location_id")
                 dishes = location.get("dishes", [])
                 summary['total_dishes'] += len(dishes)
                 
-                # Incrementar contagem de pratos para este restaurante
                 summary['dishes_by_restaurant'][restaurant_id] += len(dishes)
-                
-                # Contagem de pratos por localização
                 summary['dishes_by_location'][f"{restaurant_id}_{location_id}"] = len(dishes)
                 
-                # Verificar pratos que precisam de reposição
                 for dish in dishes:
                     if dish.get("needs_reposition", False):
                         summary['needs_reposition'].append({
