@@ -11,7 +11,8 @@ import logging
 import os
 import threading
 import time
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, send_file, Response
+import cv2
 from pathlib import Path
 
 class APIServer:
@@ -19,21 +20,21 @@ class APIServer:
     Classe responsável por fornecer uma API HTTP para o sistema de monitoramento.
     """
     
-    def __init__(self, host='0.0.0.0', port=3320, data_file="buffet_data.json", system_instance=None):
+    def __init__(self, camera_threads, camera_info, host='0.0.0.0', port=3320):
         """
         Inicializa o servidor de API.
         
         Args:
-            host: Host para o servidor Flask
-            port: Porta para o servidor Flask
-            data_file: Caminho para o arquivo JSON com os dados
-            system_instance: Instância do sistema para encerramento
+            camera_threads: Dicionário com as instâncias das threads de câmera.
+            camera_info: Dicionário com informações de configuração das câmeras.
+            host: Host para o servidor Flask.
+            port: Porta para o servidor Flask.
         """
         self.logger = logging.getLogger(__name__)
         self.host = host
         self.port = port
-        self.data_file = Path(data_file)
-        self.system_instance = system_instance
+        self.camera_threads = camera_threads
+        self.camera_info = camera_info
         self.app = Flask(__name__)
         self.running = False
         self.server_thread = None
@@ -47,75 +48,51 @@ class APIServer:
         """
         Configura as rotas da API.
         """
-        @self.app.route('/api/data', methods=['GET'])
-        def get_data():
-            try:
-                # Verificar se o arquivo existe
-                if not self.data_file.exists():
-                    self.logger.warning(f"Arquivo {self.data_file} não encontrado")
-                    return jsonify({"error": "Data file not found"}), 404
-                
-                # Enviar o arquivo
-                self.logger.info(f"Enviando arquivo {self.data_file}")
-                
-                # Iniciar thread para encerrar o sistema após enviar o arquivo
-                if self.system_instance is not None:
-                    threading.Thread(target=self._shutdown_system, daemon=True).start()
-                
-                return send_file(self.data_file, mimetype='application/json', as_attachment=True)
-                
-            except Exception as e:
-                self.logger.error(f"Erro ao processar requisição: {e}")
-                return jsonify({"error": str(e)}), 500
-        
         @self.app.route('/api/status', methods=['GET'])
         def get_status():
+            """Retorna o status geral do sistema e das câmeras."""
             try:
-                # Verificar se o arquivo existe e tem dados
-                if not self.data_file.exists():
-                    return jsonify({
-                        "status": "running",
-                        "data_file": False,
-                        "message": "Sistema em execução, arquivo de dados ainda não criado"
-                    })
+                camera_statuses = {}
+                for cam_id, cam_thread in self.camera_threads.items():
+                    camera_statuses[cam_id] = {
+                        "name": self.camera_info.get(cam_id, {}).get("name", cam_id),
+                        "is_alive": cam_thread.is_alive(),
+                        "running": cam_thread.running,
+                        "frame_count": cam_thread.frame_count
+                    }
                 
-                # Verificar se o arquivo tem dados
-                try:
-                    with open(self.data_file, 'r') as f:
-                        data = json.load(f)
-                        data_count = sum(len(cameras) for cameras in data.values())
-                except (json.JSONDecodeError, IOError):
-                    data_count = 0
-                
-                # Retornar status
                 return jsonify({
-                    "status": "running",
-                    "data_file": True,
-                    "data_count": data_count,
-                    "message": f"Sistema em execução, {data_count} itens monitorados"
+                    "system_status": "running",
+                    "camera_threads": len(self.camera_threads),
+                    "cameras": camera_statuses
                 })
-                
             except Exception as e:
-                self.logger.error(f"Erro ao obter status: {e}")
+                self.logger.error(f"Erro ao obter status: {e}", exc_info=True)
                 return jsonify({"error": str(e)}), 500
-    
-    def _shutdown_system(self):
-        """
-        Encerra o sistema após um pequeno delay para garantir que a resposta HTTP seja enviada.
-        """
-        self.logger.info("Preparando para encerrar o sistema...")
-        
-        # Aguardar um momento para garantir que a resposta HTTP seja enviada
-        time.sleep(2)
-        
-        # Encerrar o sistema
-        if self.system_instance and hasattr(self.system_instance, 'stop'):
-            self.logger.info("Encerrando o sistema de monitoramento...")
-            self.system_instance.stop()
-        else:
-            self.logger.warning("Não foi possível encerrar o sistema")
-    
-    def start(self):
+
+        @self.app.route('/api/cameras/<camera_id>/frame.jpg', methods=['GET'])
+        def get_camera_frame(camera_id):
+            """Retorna o último frame anotado de uma câmera como uma imagem JPEG."""
+            if camera_id not in self.camera_threads:
+                return jsonify({"error": "Camera ID not found"}), 404
+
+            cam_thread = self.camera_threads[camera_id]
+            frame = cam_thread.get_annotated_frame()
+
+            if frame is None:
+                return jsonify({"error": "Frame not available"}), 404
+
+            try:
+                ret, buffer = cv2.imencode('.jpg', frame)
+                if not ret:
+                    return jsonify({"error": "Failed to encode frame"}), 500
+                
+                return Response(buffer.tobytes(), mimetype='image/jpeg')
+            except Exception as e:
+                self.logger.error(f"Erro ao codificar frame para {camera_id}: {e}", exc_info=True)
+                return jsonify({"error": "Frame encoding error"}), 500
+
+    def run(self):
         """
         Inicia o servidor Flask em uma thread separada.
         """
@@ -123,10 +100,7 @@ class APIServer:
             self.logger.warning("Servidor já está em execução")
             return
         
-        def run_flask():
-            self.app.run(host=self.host, port=self.port, debug=False, use_reloader=False)
-        
-        self.server_thread = threading.Thread(target=run_flask, name="APIServerThread")
+        self.server_thread = threading.Thread(target=self.app.run, kwargs={'host': self.host, 'port': self.port})
         self.server_thread.daemon = True
         self.server_thread.start()
         self.running = True
@@ -135,10 +109,12 @@ class APIServer:
     
     def stop(self):
         """
-        Para o servidor Flask.
+        Para o servidor Flask. A thread daemon será encerrada com a aplicação.
         """
         if not self.running:
             return
             
         self.logger.info("Parando servidor API...")
+        # A thread do servidor Flask é daemon, então ela terminará quando o app principal sair.
+        # Uma parada mais graciosa poderia ser implementada aqui se necessário.
         self.running = False

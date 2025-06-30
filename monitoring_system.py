@@ -1,0 +1,236 @@
+import json
+import logging
+import threading
+import time
+from pathlib import Path
+import cv2
+
+# Importações refatoradas
+from api_server import APIServer
+from camera_worker import CameraThread
+from vision_model import YOLOProcessor
+from utils.dish_name_mapper import DishNameReplacer
+from detection_processor import FrameProcessor
+
+class BuffetMonitoringSystem:
+    """
+    Classe principal que orquestra todo o sistema de monitoramento do buffet.
+    """
+    
+    def __init__(self, config_path="config", show_visualization=True):
+        self.logger = logging.getLogger(__name__)
+        self.config_dir = Path(config_path)
+        self.show_visualization = show_visualization
+        self.running = False
+        self.cameras_config = None
+        self.camera_threads = {}
+        self.vision_processor = None
+        self.camera_info_map = {}
+        self.dish_name_replacer = None
+        self.api_server = None
+        self.frame_processor = FrameProcessor()
+
+    def load_configs(self):
+        """
+        Carrega as configurações de câmeras e nomes de pratos.
+        """
+        self.logger.info("Carregando configurações...")
+        try:
+            # Carregar configuração das câmeras
+            with open(self.config_dir / "cameras.json", "r", encoding="utf-8") as f:
+                self.cameras_config = json.load(f)
+            
+            # Criar mapa de informações de câmera para fácil acesso
+            self.camera_info_map = {
+                cam["id"]: {"name": cam.get("name", cam.get("id")), "dishes": cam.get("dishes", [])}
+                for cam in self.cameras_config.get("cameras", [])
+            }
+            
+            # Carregar e configurar o substituidor de nomes de pratos
+            nomes_path = self.config_dir / "nomes.json"
+            self.dish_name_replacer = DishNameReplacer(nomes_path)
+            
+            self.logger.info("Configurações carregadas com sucesso.")
+        except FileNotFoundError as e:
+            self.logger.error(f"Arquivo de configuração não encontrado: {e}")
+            raise
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Erro ao decodificar JSON de configuração: {e}")
+            raise
+
+    def check_cuda(self):
+        """
+        Verifica a disponibilidade do CUDA e inicializa o processador de visão.
+        """
+        self.logger.info("Verificando disponibilidade do CUDA...")
+        try:
+            # Esta é uma maneira simplificada. A lógica real pode estar dentro de YOLOProcessor.
+            # Supondo que YOLOProcessor lida com a seleção de dispositivo (CPU/GPU).
+            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt")
+            # A lógica original para verificar torch e cuda foi abstraída para dentro do YOLOProcessor
+            self.logger.info("Processador de visão (YOLO) inicializado.")
+        except Exception as e:
+            self.logger.error(f"Falha ao inicializar o processador de visão: {e}")
+            self.vision_processor = None
+            # O sistema pode continuar sem visão, mas registrará avisos.
+            if self.show_visualization:
+                self.logger.warning("Visualização será desativada devido à falha na inicialização da visão.")
+                self.show_visualization = False
+
+    def start_visualization_thread(self):
+        """
+        Inicia uma thread para a visualização das câmeras.
+        """
+        if self.show_visualization:
+            self.logger.info("Iniciando thread de visualização")
+            vis_thread = threading.Thread(target=self.visualization_loop, name="VisualizationThread")
+            vis_thread.daemon = True
+            vis_thread.start()
+
+    def visualization_loop(self):
+        """
+        Loop que exibe os frames anotados das câmeras.
+        """
+        self.logger.info("Visualização ativada. Pressione 'q' na janela para sair.")
+        try:
+            while self.running:
+                frames_to_show = []
+                for cam_id, thread in self.camera_threads.items():
+                    frame = thread.get_annotated_frame()
+                    if frame is not None:
+                        frames_to_show.append(frame)
+                
+                if frames_to_show:
+                    combined_frame = self.frame_processor.concat_frames(frames_to_show)
+                    cv2.imshow("Buffet Monitor", combined_frame)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.logger.info("Tecla 'q' pressionada. Encerrando o sistema.")
+                    self.stop()
+                    break
+                time.sleep(0.05) # Pequena pausa para não sobrecarregar a CPU
+        except Exception as e:
+            self.logger.error(f"Erro na thread de visualização: {e}", exc_info=True)
+        finally:
+            cv2.destroyAllWindows()
+
+    def start_camera_threads(self):
+        """
+        Inicia uma thread para cada câmera configurada.
+        """
+        self.logger.info("Iniciando threads das câmeras...")
+        for camera in self.cameras_config["cameras"]:
+            cam_id = camera["id"]
+            thread = CameraThread(
+                camera_id=cam_id,
+                camera_config=camera,
+                vision_processor=self.vision_processor,
+                camera_info_map=self.camera_info_map,
+                dish_name_replacer=self.dish_name_replacer,
+                frame_processor=self.frame_processor
+            )
+            self.camera_threads[cam_id] = thread
+            thread.start()
+        self.logger.info(f"{len(self.camera_threads)} threads de câmera iniciadas.")
+
+    def start_api_server(self):
+        """
+        Inicia o servidor de API para consulta externa.
+        """
+        self.logger.info("Iniciando servidor da API...")
+        self.api_server = APIServer(
+            camera_threads=self.camera_threads, 
+            camera_info=self.camera_info_map
+        )
+        api_thread = threading.Thread(target=self.api_server.run, name="APIServerThread")
+        api_thread.daemon = True
+        api_thread.start()
+
+    def start(self):
+        """
+        Inicia os componentes do sistema.
+        """
+        try:
+            self.load_configs()
+            self.check_cuda()
+            
+            self.running = True
+            
+            self.start_camera_threads()
+            self.start_api_server()
+            
+            if self.show_visualization:
+                self.logger.info("Visualização ativada. Pressione 'q' na janela para sair.")
+                
+                # Dimensões para redimensionamento
+                target_height = 360  # Altura padrão para cada frame na grade
+
+                while self.running:
+                    frames_to_show = []
+                    # Coleta os frames mais recentes de todas as threads
+                    for cam_id, thread in self.camera_threads.items():
+                        frame = thread.get_annotated_frame()
+                        if frame is not None:
+                            # Redimensiona o frame para uma altura padrão, mantendo a proporção
+                            h, w, _ = frame.shape
+                            scale = target_height / h
+                            target_width = int(w * scale)
+                            resized_frame = cv2.resize(frame, (target_width, target_height))
+                            frames_to_show.append(resized_frame)
+                    
+                    if frames_to_show:
+                        # Concatena os frames em uma única imagem
+                        combined_frame = self.frame_processor.concat_frames(frames_to_show)
+                        if combined_frame is not None and combined_frame.size > 0:
+                            cv2.imshow("Buffet Monitor", combined_frame)
+                    
+                    # O waitKey é crucial para que o OpenCV processe os eventos da janela
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        self.logger.info("Tecla 'q' pressionada. Encerrando...")
+                        self.stop()
+                        break
+                    
+                    # Pequena pausa para não sobrecarregar a CPU
+                    time.sleep(0.02)
+            else:
+                # Modo headless
+                while self.running:
+                    time.sleep(1)
+
+        except KeyboardInterrupt:
+            self.logger.info("Interrupção de teclado recebida. Encerrando...")
+        except Exception as e:
+            self.logger.exception(f"Erro fatal no sistema: {e}")
+        finally:
+            self.stop()
+
+    def stop(self):
+        """
+        Para todos os componentes do sistema.
+        """
+        if not self.running:
+            return
+            
+        self.running = False
+        self.logger.info("Iniciando processo de encerramento do sistema...")
+
+        # Parar threads das câmeras
+        self.logger.info("Parando threads das câmeras...")
+        for cam_id, thread in self.camera_threads.items():
+            if thread.is_alive():
+                thread.stop()
+        
+        # Aguardar as threads terminarem
+        for cam_id, thread in self.camera_threads.items():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                self.logger.warning(f"Thread da câmera {cam_id} não respondeu ao comando de parada.")
+
+        # O servidor da API é uma thread daemon, então ele será encerrado automaticamente.
+        # Se fosse necessário um encerramento gracioso, seria implementado aqui.
+        self.logger.info("Servidor da API será encerrado.")
+
+        # Fechar janelas de visualização
+        cv2.destroyAllWindows()
+
+        self.logger.info("Sistema encerrado.") 
