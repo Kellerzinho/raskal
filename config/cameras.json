@@ -8,7 +8,7 @@
             "source_id": 0,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet Padrão",
             "max_fps": 15
         },
         {
@@ -19,7 +19,7 @@
             "source_id": 1,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet Principal",
             "max_fps": 15
         },
         {
@@ -30,7 +30,7 @@
             "source_id": 2,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Entradas",
             "max_fps": 15
         },
         {
@@ -41,7 +41,7 @@
             "source_id": 3,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Saladas",
             "max_fps": 15
         },
         {
@@ -52,7 +52,7 @@
             "source_id": 4,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Pratos Quentes",
             "max_fps": 15
         },
         {
@@ -63,7 +63,7 @@
             "source_id": 5,
             "username": "adm7n",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Sobremesas",
             "max_fps": 15
         },
         {
@@ -74,7 +74,7 @@
             "source_id": 6,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet Vegetariano",
             "max_fps": 15
         },
         {
@@ -85,7 +85,7 @@
             "source_id": 7,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Frutas",
             "max_fps": 15
         },
         {
@@ -96,7 +96,7 @@
             "source_id": 8,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Bebidas",
             "max_fps": 15
         },
         {
@@ -107,7 +107,7 @@
             "source_id": 9,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet Infantil",
             "max_fps": 15
         },
         {
@@ -118,7 +118,7 @@
             "source_id": 10,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet de Sopas",
             "max_fps": 15
         },
         {
@@ -129,7 +129,7 @@
             "source_id": 11,
             "username": "admin",
             "password": "admin",
-            "location": "",
+            "location_name": "Buffet Extra",
             "max_fps": 15
         }
     ]
