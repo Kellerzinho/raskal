@@ -49,18 +49,14 @@ class DetectionProcessor:
         self.camera_info = camera_info
         self.dish_name_replacer = dish_name_replacer or DishNameReplacer() # Fallback para o caso de não ser fornecido
         
-        self.color_map = {
-            'food_tray': (0, 255, 0),
-            'empty_tray': (0, 0, 255),
-            'low_food': (0, 165, 255),
-            'medium_food': (0, 255, 255),
-            'full_food': (0, 255, 0),
-            'default': (255, 255, 255)
-        }
+        # Configurações de fonte e linha para as detecções
         self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.font_scale = 0.5
-        self.font_thickness = 1
-        self.line_thickness = 2
+        self.font_scale = 1.0
+        self.font_thickness = 2
+        self.line_thickness = 3
+        
+        # Data de referência para reset diário
+        self.current_date = datetime.now().date()
         
         self._init_data_file()
         
@@ -85,7 +81,7 @@ class DetectionProcessor:
     def process_detections(self, frame, camera_id, boxes, class_names):
         """
         Processa as detecções do YOLO, desenha no frame e calcula estatísticas.
-        Recebe o objeto 'Boxes' da Ultralytics.
+        Agora soma as áreas de todas as detecções do mesmo prato em um único frame.
         """
         if frame is None:
             self.logger.warning(f"Frame nulo recebido de {camera_id}")
@@ -105,88 +101,95 @@ class DetectionProcessor:
 
         stats['total_detections'] = len(boxes)
 
+        # Dicionário para acumular áreas por prato
+        dish_areas = {}  # key: dish_name, value: total_area
+        dish_detections = {}  # key: dish_name, value: list of (bbox, confidence, original_class_name)
+
+        # Primeira passagem: acumular áreas e informações de detecção
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             confidence = boxes.conf[i].item()
             class_id = int(boxes.cls[i].item())
             original_class_name = class_names[class_id]
-
-            # Traduz o nome da classe para obter o nome do prato específico
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
-            
-            # Desenha a detecção no frame
-            annotated_frame = self.draw_detection(
-                frame=annotated_frame,
-                label_text=dish_name,
-                color_key=original_class_name, # Usa a classe original para a cor
-                confidence=confidence,
-                bbox=bbox
-            )
             
             area = self.calculate_area(bbox)
             
-            area_percentage = 0.0
-            if area > 0:
-                # A lógica de área e salvamento usa o nome do prato
-                area_percentage = self.update_consolidated_max_area(dish_name, camera_id, area)
-                
-                if area_percentage < 0.3:
-                    stats['needs_refill'].append({
-                        'id': f"{camera_id}_{dish_name}_{i}", 
-                        'class': dish_name, 
-                        'percentage': area_percentage
-                    })
-
-                self.save_if_best_camera(camera_id, dish_name, area_percentage)
+            # Acumula a área total para este prato
+            if dish_name not in dish_areas:
+                dish_areas[dish_name] = 0
+                dish_detections[dish_name] = []
+            
+            dish_areas[dish_name] += area
+            dish_detections[dish_name].append((bbox, confidence, original_class_name))
 
             if dish_name in stats['classes']:
                 stats['classes'][dish_name] += 1
             else:
                 stats['classes'][dish_name] = 1
+
+        # Segunda passagem: processar e salvar dados consolidados
+        for dish_name, total_area in dish_areas.items():
+            # Atualiza a área máxima com a soma total das áreas
+            area_percentage = self.update_consolidated_max_area(dish_name, camera_id, total_area)
             
-            stats['area_percentages'][f"{camera_id}_{dish_name}_{i}"] = area_percentage
+            # Salva os dados consolidados se for a melhor câmera
+            self.save_if_best_camera(camera_id, dish_name, area_percentage)
+
+            # Atualiza estatísticas
+            stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
+            
+            if area_percentage < 0.3:
+                stats['needs_refill'].append({
+                    'id': f"{camera_id}_{dish_name}", 
+                    'class': dish_name, 
+                    'percentage': area_percentage
+                })
+
+            # Desenha todas as detecções individuais no frame
+            for bbox, confidence, original_class_name in dish_detections[dish_name]:
+                annotated_frame = self.draw_detection(
+                    frame=annotated_frame,
+                    label_text=f"{dish_name} (Total: {area_percentage:.1%})",
+                    color_key=original_class_name,
+                    confidence=confidence,
+                    bbox=bbox
+                )
 
         return annotated_frame, stats
     
     def draw_detection(self, frame, label_text, color_key, confidence, bbox):
         """
         Desenha uma detecção no frame com bounding box, classe e porcentagem.
-        - label_text: O texto a ser exibido (ex: "Arroz Branco").
-        - color_key: A chave para o mapa de cores (ex: "empty_tray").
+        - label_text: O texto a ser exibido (ex: "Arroz Branco (Total: 85%)").
+        - color_key: Não mais utilizado, todas as detecções são verdes.
         """
         x1, y1, x2, y2 = map(int, bbox)
         
-        color = self.color_map.get(color_key, self.color_map['default'])
-        color_bgr = (color[2], color[1], color[0])
+        # Cor verde fixa para todas as detecções
+        color_bgr = (255, 255, 255)
         
+        # Desenha a bounding box
         cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, self.line_thickness)
         
-        percentage_text = ""
-        with self.max_areas_lock:
-            if label_text in self.max_areas:
-                area = self.calculate_area(bbox)
-                max_area = self.max_areas[label_text]['max_area']
-                if max_area > 0:
-                    percentage = min(area / max_area, 1.0) * 100
-                    percentage_text = f" ({percentage:.1f}%)"
-        
-        text = f"{label_text}{percentage_text}"
-        
-        text_size, _ = cv2.getTextSize(text, self.font, self.font_scale, self.font_thickness)
+        # Calcula o tamanho do texto completo
+        text_size, _ = cv2.getTextSize(label_text, self.font, self.font_scale, self.font_thickness)
         text_width, text_height = text_size
         
+        # Fundo para o texto na parte inferior
         cv2.rectangle(
             frame, 
-            (x1, y1 - text_height - 5), 
-            (x1 + text_width, y1), 
+            (x1, y2 - text_height - 5), 
+            (x1 + text_width, y2), 
             color_bgr, 
             -1
         )
         
+        # Texto na parte inferior
         cv2.putText(
             frame, 
-            text, 
-            (x1, y1 - 5), 
+            label_text, 
+            (x1, y2 - 5), 
             self.font, 
             self.font_scale, 
             (0, 0, 0),
@@ -207,15 +210,25 @@ class DetectionProcessor:
     def update_consolidated_max_area(self, dish_name, camera_id, current_area):
         """
         Atualiza a área máxima consolidada para um prato e retorna a porcentagem atual.
+        Agora inclui verificação de data para reset diário.
         """
         percentage = 1.0
+        current_date = datetime.now().date()
         
         with self.max_areas_lock:
+            # Verifica se precisa resetar as áreas máximas
+            if current_date != self.current_date:
+                self.logger.info("Novo dia detectado. Resetando áreas máximas...")
+                self.max_areas.clear()
+                self.current_date = current_date
+                self.logger.info(f"Áreas máximas resetadas. Nova data de referência: {self.current_date}")
+            
             if dish_name not in self.max_areas:
                 self.max_areas[dish_name] = {
                     'max_area': current_area,
                     'first_seen': time.time(),
-                    'last_seen': time.time()
+                    'last_seen': time.time(),
+                    'reference_date': current_date
                 }
                 percentage = 1.0
                 self.logger.debug(f"Novo prato registrado: {dish_name} (área: {current_area})")
@@ -348,14 +361,17 @@ class DetectionProcessor:
     def clean_old_records(self, max_age_seconds=3600):
         """
         Remove registros de objetos que não são vistos há um determinado tempo.
+        Agora também verifica a data de referência.
         """
         current_time = time.time()
+        current_date = datetime.now().date()
         dishes_to_remove = []
         
         with self.max_areas_lock:
             for dish_name, data in self.max_areas.items():
                 last_seen = data['last_seen']
-                if current_time - last_seen > max_age_seconds:
+                # Remove se passou do tempo máximo ou se é de um dia anterior
+                if (current_time - last_seen > max_age_seconds):
                     dishes_to_remove.append(dish_name)
             
             for dish_name in dishes_to_remove:
