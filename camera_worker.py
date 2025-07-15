@@ -43,6 +43,9 @@ class CameraThread(threading.Thread):
         self.max_consecutive_failures = 5
         self.consecutive_failures = 0
         
+        self.last_boxes = None  # Armazena as últimas caixas de detecção
+        self.last_model_names = None  # Armazena os nomes para os labels
+        
         # Inicializa com um frame de status "Aguardando"
         width = self.camera_config.get("width", 800)
         height = self.camera_config.get("height", 600)
@@ -131,21 +134,38 @@ class CameraThread(threading.Thread):
                     time.sleep(1)
                     continue
 
-                # Lógica de processamento de frame
-                annotated_frame = frame.copy()
+                # Processar com YOLO
                 results = self.vision_processor.process_frame(frame)
                 
+                # Verificar se há detecções
                 if self.detection_processor and results and len(results[0].boxes) > 0:
+                    # Se houver detecções, processá-las e armazená-las para persistência
+                    self.last_boxes = results[0].boxes
+                    self.last_model_names = self.vision_processor.model.names
+                    
                     annotated_frame, _ = self.detection_processor.process_detections(
-                        annotated_frame,
+                        frame.copy(),
                         self.camera_id,
-                        results[0].boxes,
-                        self.vision_processor.model.names
+                        self.last_boxes,
+                        self.last_model_names
                     )
+                else:
+                    # Se não houver detecções, usar as últimas caixas conhecidas
+                    if self.last_boxes is not None:
+                        annotated_frame = self.detection_processor.draw_persistent_boxes(
+                            frame.copy(),
+                            self.last_boxes,
+                            self.last_model_names
+                        )
+                    else:
+                        # Se não houver detecções nem caixas antigas, o frame é uma cópia
+                        annotated_frame = frame.copy()
                 
+                # Adicionar timestamp ao frame final (com ou sem detecções)
                 if self.frame_processor:
                     self.frame_processor.add_timestamp(annotated_frame, self.camera_id)
                 
+                # Atualizar os frames na thread
                 with self.frame_lock:
                     self.current_frame = frame
                     self.current_annotated_frame = annotated_frame

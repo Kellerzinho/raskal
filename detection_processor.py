@@ -462,6 +462,31 @@ class DetectionProcessor:
         
         return summary
 
+    def draw_persistent_boxes(self, frame, boxes, class_names):
+        """
+        Desenha caixas de detecção persistentes em um frame sem recalcular ou salvar dados.
+        Usa um label simplificado apenas com o nome do prato.
+        """
+        annotated_frame = frame.copy()
+        for i in range(len(boxes)):
+            bbox = boxes.xyxy[i].cpu().numpy()
+            confidence = boxes.conf[i].item()
+            class_id = int(boxes.cls[i].item())
+            original_class_name = class_names[class_id]
+            dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+
+            # Label simplificado para a caixa persistente
+            label_text = f"{dish_name} (persistente)"
+
+            annotated_frame = self.draw_detection(
+                frame=annotated_frame,
+                label_text=label_text,
+                color_key=original_class_name,
+                confidence=confidence,
+                bbox=bbox
+            )
+        return annotated_frame
+
 
 class FrameProcessor:
     """
