@@ -255,7 +255,7 @@ class DetectionProcessor:
                 if current_area > current_max:
                     self.max_areas[dish_name]['max_area'] = current_area
                     percentage = 1.0
-                    self.logger.info(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
+                    self.logger.debug(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
                 else:
                     percentage = current_area / current_max if current_max > 0 else 1.0
         
@@ -349,7 +349,7 @@ class DetectionProcessor:
                         }]
                     }
                     if self.external_client.send_data(payload):
-                        self.logger.info(f"Dados enviados com sucesso para o dashboard: {restaurant_name} - {location_name} - {dish_name}: {percentage:.1%}")
+                        self.logger.debug(f"Dados enviados com sucesso para o dashboard: {restaurant_name} - {location_name} - {dish_name}: {percentage:.1%}")
                     
         except Exception as e:
             self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}", exc_info=True) # Adicionado exc_info para mais detalhes
@@ -462,10 +462,10 @@ class DetectionProcessor:
         
         return summary
 
-    def draw_persistent_boxes(self, frame, boxes, class_names):
+    def draw_persistent_boxes(self, frame, boxes, class_names, camera_id, last_percentages):
         """
         Desenha caixas de detecção persistentes em um frame sem recalcular ou salvar dados.
-        Usa um label simplificado apenas com o nome do prato.
+        Exibe a última porcentagem conhecida para cada prato.
         """
         annotated_frame = frame.copy()
         for i in range(len(boxes)):
@@ -475,8 +475,9 @@ class DetectionProcessor:
             original_class_name = class_names[class_id]
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
 
-            # Label simplificado para a caixa persistente
-            label_text = f"{dish_name} (persistente)"
+            # Usar a última porcentagem conhecida, ou 0% se não houver
+            percentage = last_percentages.get(dish_name, 0.0)
+            label_text = f"{dish_name} (Total: {percentage:.1%})"
 
             annotated_frame = self.draw_detection(
                 frame=annotated_frame,

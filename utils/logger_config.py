@@ -26,9 +26,12 @@ class LoggerManager:
         self.logger = logging.getLogger(__name__)
         self.logger.debug("Sistema de logging inicializado")
     
-    def setup_root_logger(self):
+    def setup_root_logger(self, console_level=logging.INFO):
         """
         Configura o root logger com handlers, formatter e filter.
+        
+        Args:
+            console_level: O nível de log para o console.
         """
         # Definir nome do arquivo de log com timestamp
         log_filename = f"buffet_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -45,7 +48,7 @@ class LoggerManager:
         
         # Criar console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(console_level)
         
         # Criar file handler para logs completos
         file_handler = logging.handlers.RotatingFileHandler(

@@ -44,7 +44,8 @@ class CameraThread(threading.Thread):
         self.consecutive_failures = 0
         
         self.last_boxes = None  # Armazena as últimas caixas de detecção
-        self.last_model_names = None  # Armazena os nomes para os labels
+        self.last_model_names = None 
+        self.last_percentages = {}  # Armazena as últimas porcentagens por nome de prato
         
         # Inicializa com um frame de status "Aguardando"
         width = self.camera_config.get("width", 800)
@@ -55,7 +56,7 @@ class CameraThread(threading.Thread):
         """
         Função principal da thread com loop de reconexão contínua.
         """
-        self.logger.info(f"Thread da câmera {self.camera_id} iniciada")
+        self.logger.debug(f"Thread da câmera {self.camera_id} iniciada")
         self.running = True
         
         # A inicialização do detection_processor foi movida para o BuffetMonitoringSystem
@@ -64,7 +65,7 @@ class CameraThread(threading.Thread):
             try:
                 camera = CameraConnection(self.camera_config)
             
-                self.logger.info(f"Estabelecendo conexão com a stream da câmera {self.camera_id}...")
+                self.logger.debug(f"Estabelecendo conexão com a stream da câmera {self.camera_id}...")
                 
                 # Gera um frame de status enquanto conecta
                 width = self.camera_config.get("width", 800)
@@ -86,7 +87,7 @@ class CameraThread(threading.Thread):
                     time.sleep(self.reconnect_interval)
                     continue
                 
-                self.logger.info(f"Conexão com a stream da câmera {self.camera_id} estabelecida com sucesso")
+                self.logger.debug(f"Conexão com a stream da câmera {self.camera_id} estabelecida com sucesso")
                 
                 if self.vision_processor:
                     self.process_frames(camera)
@@ -108,9 +109,9 @@ class CameraThread(threading.Thread):
         Este método agora retorna ao loop principal de conexão em caso de falhas
         persistentes para garantir uma reconexão mais robusta.
         """
-        self.logger.info(f"Iniciando processamento de stream da câmera {self.camera_id} com modelo YOLO")
+        self.logger.debug(f"Iniciando processamento de stream da câmera {self.camera_id} com modelo YOLO")
         
-        self.logger.info(f"Abrindo stream de vídeo para a câmera {self.camera_id}...")
+        self.logger.debug(f"Abrindo stream de vídeo para a câmera {self.camera_id}...")
         cap = cv2.VideoCapture(camera.stream_url)
         
         if not cap.isOpened():
@@ -148,19 +149,29 @@ class CameraThread(threading.Thread):
                     self.last_boxes = results[0].boxes
                     self.last_model_names = self.vision_processor.model.names
                     
-                    annotated_frame, _ = self.detection_processor.process_detections(
+                    annotated_frame, stats = self.detection_processor.process_detections(
                         frame.copy(),
                         self.camera_id,
                         self.last_boxes,
                         self.last_model_names
                     )
+                    
+                    # Capturar as porcentagens calculadas para usar nas caixas persistentes
+                    self.last_percentages = {}
+                    for key, percentage in stats.get('area_percentages', {}).items():
+                        # key tem formato "camera_id_dish_name", extrair apenas o dish_name
+                        if key.startswith(f"{self.camera_id}_"):
+                            dish_name = key[len(f"{self.camera_id}_"):]
+                            self.last_percentages[dish_name] = percentage
                 else:
                     # Se não houver detecções, usar as últimas caixas conhecidas
                     if self.last_boxes is not None:
                         annotated_frame = self.detection_processor.draw_persistent_boxes(
                             frame.copy(),
                             self.last_boxes,
-                            self.last_model_names
+                            self.last_model_names,
+                            self.camera_id,
+                            self.last_percentages
                         )
                     else:
                         # Se não houver detecções nem caixas antigas, o frame é uma cópia

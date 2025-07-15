@@ -80,7 +80,7 @@ class NetCamStudioConnection:
         Returns:
             bool: True se o web server estiver funcionando
         """
-        self.logger.info(f"Testando web server do NetCam Studio X {self.camera_id}...")
+        self.logger.debug(f"Testando web server do NetCam Studio X {self.camera_id}...")
         
         # URLs de teste para verificar se o web server está ativo
         test_urls = [
@@ -96,14 +96,14 @@ class NetCamStudioConnection:
                 
                 # NetCam Studio X pode retornar diferentes códigos de status
                 if response.status_code in [200, 401, 403]:  # 401/403 indica que o servidor está ativo mas precisa auth
-                    self.logger.info(f"Web server NetCam Studio X {self.camera_id} está ativo")
+                    self.logger.debug(f"Web server NetCam Studio X {self.camera_id} está ativo")
                     self.connection_tested = True
                     self.web_server_enabled = True
                     
                     if response.status_code == 401:
-                        self.logger.info(f"Servidor requer autenticação (HTTP 401)")
+                        self.logger.debug(f"Servidor requer autenticação (HTTP 401)")
                     elif response.status_code == 403:
-                        self.logger.info(f"Acesso negado - verifique permissões (HTTP 403)")
+                        self.logger.debug(f"Acesso negado - verifique permissões (HTTP 403)")
                     
                     return True
                 else:
@@ -138,7 +138,7 @@ class NetCamStudioConnection:
         Returns:
             str: URL do stream que funciona, ou None se nenhuma funcionar
         """
-        self.logger.info(f"Procurando URL de stream funcionando para {self.camera_id}...")
+        self.logger.debug(f"Procurando URL de stream funcionando para {self.camera_id}...")
         
         # Ordem de prioridade baseada na documentação encontrada
         priority_order = [
@@ -180,8 +180,8 @@ class NetCamStudioConnection:
                 cap.release()
                 
                 if success_count >= 1:  # Pelo menos 1 frame válido
-                    self.logger.info(f"Stream funcionando com formato {format_name}")
-                    self.logger.info(f"URL ativa: {url}")
+                    self.logger.debug(f"Stream funcionando com formato {format_name}")
+                    self.logger.debug(f"URL ativa: {url}")
                     self.active_stream_url = url
                     self.is_connected = True
                     return url
@@ -205,7 +205,7 @@ class NetCamStudioConnection:
         Returns:
             bool: True se a conexão for bem-sucedida
         """
-        self.logger.info(f"Iniciando conexão com NetCam Studio X {self.camera_id}")
+        self.logger.debug(f"Iniciando conexão com NetCam Studio X {self.camera_id}")
         
         # Passo 1: Testar se o web server está funcionando
         if not self.test_web_server():
@@ -213,7 +213,7 @@ class NetCamStudioConnection:
         
         # Passo 2: Encontrar uma URL de stream que funcione
         if self.find_working_stream_url():
-            self.logger.info(f"Conexão com stream do NetCam Studio X {self.camera_id} estabelecida com sucesso")
+            self.logger.debug(f"Conexão com stream do NetCam Studio X {self.camera_id} estabelecida com sucesso")
             return True
         else:
             self.logger.error(f"Falha ao estabelecer conexão com stream do NetCam Studio X {self.camera_id}")

@@ -14,8 +14,8 @@ def main():
     """
     Função principal que inicializa e executa o sistema.
     """
-    # Configura o sistema de logging em primeiro lugar
-    LoggerManager()
+    # Configura o sistema de logging para o nível INFO no console
+    LoggerManager().setup_root_logger(console_level=logging.INFO)
     
     logger = logging.getLogger(__name__)
     logger.info("Aplicação Buffet Monitor iniciada")
