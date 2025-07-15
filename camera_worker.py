@@ -105,34 +105,39 @@ class CameraThread(threading.Thread):
     def process_frames(self, camera):
         """
         Processa frames da câmera com detecção YOLO.
-        Este método agora contém seu próprio loop de reconexão de stream
-        para ser mais resiliente a falhas temporárias.
+        Este método agora retorna ao loop principal de conexão em caso de falhas
+        persistentes para garantir uma reconexão mais robusta.
         """
         self.logger.info(f"Iniciando processamento de stream da câmera {self.camera_id} com modelo YOLO")
-        cap = None
         
+        self.logger.info(f"Abrindo stream de vídeo para a câmera {self.camera_id}...")
+        cap = cv2.VideoCapture(camera.stream_url)
+        
+        if not cap.isOpened():
+            self.logger.warning(f"Não foi possível abrir a stream para {self.camera_id}. A conexão será tentada novamente.")
+            return  # Retorna para o loop principal em run()
+
+        self.consecutive_failures = 0  # Reseta o contador ao iniciar um novo processamento
+
         while self.running:
             try:
-                # Se o objeto de captura não existe ou não está aberto, tente (re)abrir.
-                if cap is None or not cap.isOpened():
-                    self.logger.info(f"Abrindo stream de vídeo para a câmera {self.camera_id}...")
-                    cap = cv2.VideoCapture(camera.stream_url)
-                    if not cap.isOpened():
-                        self.logger.warning(f"Não foi possível abrir a stream para {self.camera_id}. Tentando novamente em {self.reconnect_interval}s...")
-                        time.sleep(self.reconnect_interval)
-                        continue
-                
                 # Controle de FPS
                 last_frame_time = time.time()
 
                 ret, frame = cap.read()
-                
+
                 if not ret:
-                    self.logger.warning(f"Falha ao ler frame da câmera {self.camera_id}. Tentando reabrir a stream...")
-                    cap.release()
-                    cap = None  # Força a reabertura na próxima iteração
-                    time.sleep(1)
+                    self.consecutive_failures += 1
+                    self.logger.warning(f"Falha ao ler frame da câmera {self.camera_id} ({self.consecutive_failures}/{self.max_consecutive_failures}).")
+                    if self.consecutive_failures >= self.max_consecutive_failures:
+                        self.logger.error(f"Atingido o limite de falhas consecutivas para {self.camera_id}. Reiniciando conexão completa.")
+                        break  # Sai do loop de processamento para forçar reconexão no método run()
+                    
+                    time.sleep(1)  # Pausa para evitar um loop muito rápido em caso de falha
                     continue
+
+                # Sucesso na leitura, reseta o contador
+                self.consecutive_failures = 0
 
                 # Processar com YOLO
                 results = self.vision_processor.process_frame(frame)
@@ -177,15 +182,12 @@ class CameraThread(threading.Thread):
 
             except Exception as e:
                 self.logger.error(f"Erro no loop de processamento da câmera {self.camera_id}: {e}", exc_info=True)
-                if cap:
-                    cap.release()
-                cap = None
-                time.sleep(self.reconnect_interval)
-        
+                break  # Sai do loop em caso de exceção para forçar reconexão
+
         # Garante que o recurso seja liberado ao sair
         if cap:
             cap.release()
-        self.logger.warning(f"Processamento de frames da câmera {self.camera_id} interrompido.")
+        self.logger.warning(f"Processamento de frames da câmera {self.camera_id} interrompido. Retornando ao gerenciador de conexão.")
 
     def get_current_frame(self):
         """
