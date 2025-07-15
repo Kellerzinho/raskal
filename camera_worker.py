@@ -12,7 +12,7 @@ class CameraThread(threading.Thread):
     Versão modificada que nunca encerra a thread, tentando continuamente reconectar.
     """
     
-    def __init__(self, camera_id, camera_config, vision_processor=None, camera_info_map=None, dish_name_replacer=None, frame_processor=None, dashboard_url=None, auth_token=None):
+    def __init__(self, camera_id, camera_config, vision_processor, detection_processor, frame_processor):
         """
         Inicializa a thread para uma câmera.
         
@@ -20,11 +20,8 @@ class CameraThread(threading.Thread):
             camera_id: ID da câmera
             camera_config: Configuração da câmera
             vision_processor: Processador de visão computacional (YOLOProcessor)
-            camera_info_map: Mapa com informações de todas as câmeras
-            dish_name_replacer: Instância para traduzir nomes de pratos
+            detection_processor: Processador de detecções para salvar dados (instância centralizada)
             frame_processor: Instância do processador de frames para anotações
-            dashboard_url: URL da API do dashboard externo
-            auth_token: Token de autenticação para a API do dashboard
         """
         super().__init__(name=f"CameraThread-{camera_id}")
         self.logger = logging.getLogger(__name__)
@@ -32,8 +29,7 @@ class CameraThread(threading.Thread):
         self.camera_config = camera_config
         self.running = False
         self.vision_processor = vision_processor
-        self.camera_info_map = camera_info_map
-        self.dish_name_replacer = dish_name_replacer
+        self.detection_processor = detection_processor # Recebe a instância
         self.frame_processor = frame_processor
         self.frame_count = 0
         self.fps_limit = camera_config.get("max_fps", 15)
@@ -41,9 +37,6 @@ class CameraThread(threading.Thread):
         self.current_frame = None
         self.current_annotated_frame = None
         self.frame_lock = threading.Lock()
-        self.detection_processor = None
-        self.dashboard_url = dashboard_url
-        self.auth_token = auth_token
         
         self.reconnect_interval = 5
         self.connection_attempts = 0
@@ -57,13 +50,7 @@ class CameraThread(threading.Thread):
         self.logger.info(f"Thread da câmera {self.camera_id} iniciada")
         self.running = True
         
-        self.detection_processor = DetectionProcessor(
-            camera_info=self.camera_info_map,
-            data_file="buffet_data.json",
-            dish_name_replacer=self.dish_name_replacer,
-            dashboard_url=self.dashboard_url,
-            auth_token=self.auth_token
-        )
+        # A inicialização do detection_processor foi movida para o BuffetMonitoringSystem
         
         while self.running:
             try:

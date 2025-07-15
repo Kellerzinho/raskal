@@ -47,7 +47,7 @@ class DetectionProcessor:
         self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
         self.best_cameras_lock = Lock()
         
-        self.data_file = data_file
+        self.data_file = "config/buffet_data.json"
         self.data_file_lock = Lock()
         self.camera_info = camera_info
         self.dish_name_replacer = dish_name_replacer or DishNameReplacer() # Fallback para o caso de não ser fornecido
@@ -94,7 +94,7 @@ class DetectionProcessor:
     def process_detections(self, frame, camera_id, boxes, class_names):
         """
         Processa as detecções do YOLO, desenha no frame e calcula estatísticas.
-        Agora soma as áreas de todas as detecções do mesmo prato em um único frame.
+        Agora agrupa por nome original de prato para salvar IDs corretos.
         """
         if frame is None:
             self.logger.warning(f"Frame nulo recebido de {camera_id}")
@@ -114,53 +114,56 @@ class DetectionProcessor:
 
         stats['total_detections'] = len(boxes)
 
-        # Dicionário para acumular áreas por prato
-        dish_areas = {}  # key: dish_name, value: total_area
-        dish_detections = {}  # key: dish_name, value: list of (bbox, confidence, original_class_name)
+        # Dicionário para acumular áreas por nome de prato ORIGINAL
+        dish_areas_by_original_name = {}  # key: original_class_name, value: total_area
+        all_detections_by_original_name = {} # key: original_class_name, value: list of (bbox, confidence)
 
-        # Primeira passagem: acumular áreas e informações de detecção
+
+        # Primeira passagem: acumular áreas e informações de detecção por nome original
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             confidence = boxes.conf[i].item()
             class_id = int(boxes.cls[i].item())
             original_class_name = class_names[class_id]
-            dish_name = self.dish_name_replacer.get_replacement(original_class_name)
             
             area = self.calculate_area(bbox)
             
-            # Acumula a área total para este prato
-            if dish_name not in dish_areas:
-                dish_areas[dish_name] = 0
-                dish_detections[dish_name] = []
-            
-            dish_areas[dish_name] += area
-            dish_detections[dish_name].append((bbox, confidence, original_class_name))
+            # Acumula a área total para este prato (pelo nome original)
+            dish_areas_by_original_name.setdefault(original_class_name, 0)
+            dish_areas_by_original_name[original_class_name] += area
 
-            if dish_name in stats['classes']:
-                stats['classes'][dish_name] += 1
-            else:
-                stats['classes'][dish_name] = 1
+            # Agrupa detecções pelo nome original
+            all_detections_by_original_name.setdefault(original_class_name, [])
+            all_detections_by_original_name[original_class_name].append((bbox, confidence))
 
-        # Segunda passagem: processar e salvar dados consolidados
-        for dish_name, total_area in dish_areas.items():
-            # Atualiza a área máxima com a soma total das áreas
+            # Para estatísticas, usa o nome traduzido
+            dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+            stats['classes'].setdefault(dish_name, 0)
+            stats['classes'][dish_name] += 1
+
+        # Segunda passagem: processar e salvar dados consolidados por nome original
+        for original_class_name, total_area in dish_areas_by_original_name.items():
+            # Nome traduzido para lógicas de negócio (área máxima, etc.)
+            dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+
+            # A área máxima é consolidada com base no nome TRADUZIDO.
             area_percentage = self.update_consolidated_max_area(dish_name, camera_id, total_area)
             
-            # Salva os dados consolidados se for a melhor câmera
-            self.save_if_best_camera(camera_id, dish_name, area_percentage)
+            # Salva os dados consolidados se for a melhor câmera, passando o nome original
+            self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
 
             # Atualiza estatísticas
             stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
             
             if area_percentage < 0.3:
                 stats['needs_refill'].append({
-                    'id': f"{camera_id}_{dish_name}", 
+                    'id': f"{camera_id}_{original_class_name}", 
                     'class': dish_name, 
                     'percentage': area_percentage
                 })
 
             # Desenha todas as detecções individuais no frame
-            for bbox, confidence, original_class_name in dish_detections[dish_name]:
+            for bbox, confidence in all_detections_by_original_name[original_class_name]:
                 annotated_frame = self.draw_detection(
                     frame=annotated_frame,
                     label_text=f"{dish_name} (Total: {area_percentage:.1%})",
@@ -266,7 +269,7 @@ class DetectionProcessor:
         
         return percentage
     
-    def save_if_best_camera(self, camera_id, dish_name, percentage):
+    def save_if_best_camera(self, camera_id, dish_name, percentage, original_class_name):
         """
         Salva os dados apenas se esta câmera tem a maior porcentagem para este prato.
         """
@@ -276,65 +279,80 @@ class DetectionProcessor:
                 is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
         
         if is_best_camera:
-            self.save_area_percentage(camera_id, dish_name, percentage)
+            self.save_area_percentage(camera_id, dish_name, percentage, original_class_name)
     
-    def save_area_percentage(self, camera_id, dish_name, percentage):
+    def save_area_percentage(self, camera_id, dish_name, percentage, original_class_name):
         """
-        Salva a porcentagem de área de um prato no arquivo JSON.
-        Agora usa o nome do restaurante da configuração da câmera.
+        Salva a porcentagem de área de um prato no arquivo JSON, seguindo a estrutura da imagem.
         """
         try:
             with self.data_file_lock:
-                # Carrega os dados existentes
-                        with open(self.data_file, 'r') as f:
-                            data = json.load(f)
+                # Usar r+ para ler e depois escrever no mesmo arquivo
+                with open(self.data_file, 'r+') as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        data = {"address": []} # Arquivo vazio ou corrompido
 
-                # Obtém o nome do restaurante da configuração da câmera
-                restaurant_name = self.camera_info[camera_id]["restaurant"]
-                location_name = self.camera_info[camera_id].get("location_name", f"Local {camera_id}")
+                    restaurant_name = self.camera_info[camera_id]["restaurant"]
+                    location_name = self.camera_info[camera_id].get("location_name", f"Local {camera_id}")
+                    dish_id = f"{camera_id}_{original_class_name}"
 
-                # Procura o restaurante na lista
-                restaurant_found = False
-                for address in data["address"]:
-                    if address["name"] == restaurant_name:
-                        restaurant_found = True
-                        # Procura o local na lista do restaurante
-                        location_found = False
-                        for location in address["locations"]:
-                            if location["name"] == location_name:
-                                location_found = True
-                                # Atualiza a porcentagem do prato
-                                location["dishes"][dish_name] = percentage
-                                break
-                        if not location_found:
-                            # Adiciona novo local se não encontrado
-                            address["locations"].append({
-                                "name": location_name,
-                                "dishes": {dish_name: percentage}
-                            })
-                        break
+                    # Encontra ou cria o restaurante
+                    restaurant_data = next((r for r in data["address"] if r["restaurant"] == restaurant_name), None)
+                    if not restaurant_data:
+                        restaurant_data = {"restaurant": restaurant_name, "locations": []}
+                        data["address"].append(restaurant_data)
 
-                if not restaurant_found:
-                    # Adiciona novo restaurante se não encontrado
-                    data["address"].append({
-                        "name": restaurant_name,
-                        "locations": [{
-                            "name": location_name,
-                            "dishes": {dish_name: percentage}
-                        }]
-                    })
+                    # Encontra ou cria a localização
+                    location_data = next((loc for loc in restaurant_data["locations"] if loc["location_id"] == camera_id), None)
+                    if not location_data:
+                        location_data = {
+                            "location_id": camera_id,
+                            "location_name": location_name,
+                            "dishes": []
+                        }
+                        restaurant_data["locations"].append(location_data)
 
-                # Salva os dados atualizados
-                with open(self.data_file, 'w') as f:
+                    # Encontra ou cria o prato
+                    dish_data = next((d for d in location_data["dishes"] if d["dish_id"] == dish_id), None)
+                    if not dish_data:
+                        dish_data = {
+                            "dish_id": dish_id,
+                            "dish_name": dish_name,
+                            "percentage_remaining": 0,
+                            "needs_reposition": False,
+                            "timestamp": ""
+                        }
+                        location_data["dishes"].append(dish_data)
+                    
+                    # Atualiza os dados do prato
+                    dish_data["percentage_remaining"] = int(percentage * 100)
+                    dish_data["needs_reposition"] = "true" if percentage < 0.3 else "false" # Convertido para string
+                    dish_data["timestamp"] = datetime.now().isoformat()
+                    
+                    # Volta ao início do arquivo para sobrescrever
+                    f.seek(0)
                     json.dump(data, f, indent=4)
-                
-                # Envia os dados para a API externa se configurada
+                    f.truncate()
+
                 if self.external_client:
-                    if self.external_client.send_data(data):
+                    # Envia apenas os dados relevantes para a API, e não o arquivo inteiro
+                    payload = {
+                        "address": [{
+                            "restaurant": restaurant_name,
+                            "locations": [{
+                                "location_id": camera_id,
+                                "location_name": location_name,
+                                "dishes": [dish_data] # Apenas o prato atualizado
+                            }]
+                        }]
+                    }
+                    if self.external_client.send_data(payload):
                         self.logger.info(f"Dados enviados com sucesso para o dashboard: {restaurant_name} - {location_name} - {dish_name}: {percentage:.1%}")
                     
         except Exception as e:
-            self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}")
+            self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}", exc_info=True) # Adicionado exc_info para mais detalhes
     
     def load_area_data(self, restaurant_id=None, camera_id=None, dish_id=None):
         """

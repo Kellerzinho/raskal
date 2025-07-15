@@ -10,7 +10,7 @@ from api_server import APIServer
 from camera_worker import CameraThread
 from vision_model import YOLOProcessor
 from utils.dish_name_mapper import DishNameReplacer
-from detection_processor import FrameProcessor
+from detection_processor import FrameProcessor, DetectionProcessor
 
 class BuffetMonitoringSystem:
     """
@@ -30,6 +30,7 @@ class BuffetMonitoringSystem:
         self.api_server = None
         self.frame_processor = FrameProcessor()
         self.dashboard_config = None
+        self.detection_processor = None # Adicionado para centralizar
 
     def load_configs(self):
         """
@@ -67,6 +68,37 @@ class BuffetMonitoringSystem:
         except json.JSONDecodeError as e:
             self.logger.error(f"Erro ao decodificar JSON de configuração: {e}")
             raise
+
+    def initialize_components(self):
+        """
+        Inicializa os componentes principais como o processador de visão e de detecção.
+        """
+        self.logger.info("Inicializando componentes do sistema...")
+        
+        # Inicializa o processador de visão (YOLO)
+        try:
+            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt")
+            self.logger.info("Processador de visão (YOLO) inicializado.")
+        except Exception as e:
+            self.logger.error(f"Falha ao inicializar o processador de visão: {e}", exc_info=True)
+            # Continua sem visão, mas a visualização será desativada se estiver ativa
+            if self.show_visualization:
+                self.logger.warning("Visualização será desativada devido à falha na inicialização da visão.")
+                self.show_visualization = False
+
+        # Inicializa o processador de detecção centralizado
+        dashboard_url = self.dashboard_config.get("url") if self.dashboard_config else None
+        auth_token = self.dashboard_config.get("auth_token") if self.dashboard_config else None
+        
+        self.detection_processor = DetectionProcessor(
+            camera_info=self.camera_info_map,
+            data_file="config/buffet_data.json",  # Caminho corrigido
+            dish_name_replacer=self.dish_name_replacer,
+            dashboard_url=dashboard_url,
+            auth_token=auth_token
+        )
+        self.logger.info("Processador de detecção centralizado inicializado.")
+
 
     def check_cuda(self):
         """
@@ -126,28 +158,18 @@ class BuffetMonitoringSystem:
 
     def start_camera_threads(self):
         """
-        Inicia uma thread para cada câmera configurada.
+        Inicia uma thread para cada câmera configurada, passando o processador de detecção.
         """
         self.logger.info("Iniciando threads das câmeras...")
         for camera in self.cameras_config["cameras"]:
             cam_id = camera["id"]
             
-            # Configuração do dashboard
-            dashboard_url = None
-            auth_token = None
-            if self.dashboard_config:
-                dashboard_url = self.dashboard_config.get("url")
-                auth_token = self.dashboard_config.get("auth_token")
-            
             thread = CameraThread(
                 camera_id=cam_id,
                 camera_config=camera,
                 vision_processor=self.vision_processor,
-                camera_info_map=self.camera_info_map,
-                dish_name_replacer=self.dish_name_replacer,
-                frame_processor=self.frame_processor,
-                dashboard_url=dashboard_url,
-                auth_token=auth_token
+                detection_processor=self.detection_processor, # Passa a instância central
+                frame_processor=self.frame_processor
             )
             self.camera_threads[cam_id] = thread
             thread.start()
@@ -172,7 +194,7 @@ class BuffetMonitoringSystem:
         """
         try:
             self.load_configs()
-            self.check_cuda()
+            self.initialize_components() # Novo método para inicializar componentes
             
             self.running = True
             
@@ -240,6 +262,12 @@ class BuffetMonitoringSystem:
             if thread.is_alive():
                 thread.stop()
         
+        # Encerramento do processador de detecção (se necessário)
+        if self.detection_processor:
+            self.logger.info("Encerrando o processador de detecção...")
+            # Adicionar aqui qualquer lógica de limpeza, como salvar um estado final
+            # Ex: self.detection_processor.shutdown()
+
         # Aguardar as threads terminarem
         for cam_id, thread in self.camera_threads.items():
             thread.join(timeout=5)
