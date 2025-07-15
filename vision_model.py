@@ -91,7 +91,7 @@ class YOLOProcessor:
             Os resultados da detecção do modelo.
         """
         if self.model:
-            return self.model(frame)
+            return self.model(frame, verbose=False)
         self.logger.warning("Modelo de visão não está carregado. Retornando None.")
         return None
 
