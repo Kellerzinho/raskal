@@ -475,6 +475,32 @@ class FrameProcessor:
         """
         self.logger = logging.getLogger(__name__)
         
+    def create_status_frame(self, text, width=800, height=600):
+        """
+        Cria um frame preto com uma mensagem de status centralizada.
+        
+        Args:
+            text (str): A mensagem a ser exibida.
+            width (int): A largura do frame.
+            height (int): A altura do frame.
+            
+        Returns:
+            np.ndarray: Um frame com a mensagem de status.
+        """
+        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1
+        font_thickness = 2
+        
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+        text_x = (width - text_width) // 2
+        text_y = (height + text_height) // 2
+        
+        cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255, 255, 255), font_thickness)
+        
+        return frame
+        
     def resize_frame(self, frame, target_width=None, target_height=None):
         """
         Redimensiona um frame para as dimensões desejadas.

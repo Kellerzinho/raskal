@@ -212,13 +212,14 @@ class BuffetMonitoringSystem:
                     # Coleta os frames mais recentes de todas as threads
                     for cam_id, thread in self.camera_threads.items():
                         frame = thread.get_annotated_frame()
-                        if frame is not None:
-                            # Redimensiona o frame para uma altura padrão, mantendo a proporção
-                            h, w, _ = frame.shape
-                            scale = target_height / h
-                            target_width = int(w * scale)
-                            resized_frame = cv2.resize(frame, (target_width, target_height))
-                            frames_to_show.append(resized_frame)
+                        # A verificação de None foi removida, pois a thread agora sempre tem um frame
+                        
+                        # Redimensiona o frame para uma altura padrão, mantendo a proporção
+                        h, w, _ = frame.shape
+                        scale = target_height / h
+                        target_width = int(w * scale)
+                        resized_frame = cv2.resize(frame, (target_width, target_height))
+                        frames_to_show.append(resized_frame)
                     
                     if frames_to_show:
                         # Concatena os frames em uma única imagem

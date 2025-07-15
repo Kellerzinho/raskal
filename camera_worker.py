@@ -43,6 +43,11 @@ class CameraThread(threading.Thread):
         self.max_consecutive_failures = 5
         self.consecutive_failures = 0
         
+        # Inicializa com um frame de status "Aguardando"
+        width = self.camera_config.get("width", 800)
+        height = self.camera_config.get("height", 600)
+        self.current_annotated_frame = self.frame_processor.create_status_frame(f"Aguardando {self.camera_id}...", width, height)
+        
     def run(self):
         """
         Função principal da thread com loop de reconexão contínua.
@@ -55,13 +60,26 @@ class CameraThread(threading.Thread):
         while self.running:
             try:
                 camera = CameraConnection(self.camera_config)
-                self.connection_attempts += 1
             
                 self.logger.info(f"Estabelecendo conexão com a stream da câmera {self.camera_id}...")
+                
+                # Gera um frame de status enquanto conecta
+                width = self.camera_config.get("width", 800)
+                height = self.camera_config.get("height", 600)
+                placeholder = self.frame_processor.create_status_frame(f"Conectando a {self.camera_id}...", width, height)
+                with self.frame_lock:
+                    self.current_annotated_frame = placeholder
+
                 stream_success = camera.try_connect_to_stream(timeout=40)
                 
                 if not stream_success:
                     self.logger.warning(f"Falha ao conectar à stream da câmera {self.camera_id}. Tentando novamente em {self.reconnect_interval} segundos...")
+                    
+                    # Gera um frame de status de falha
+                    placeholder = self.frame_processor.create_status_frame(f"Falha - {self.camera_id}", width, height)
+                    with self.frame_lock:
+                        self.current_annotated_frame = placeholder
+                        
                     time.sleep(self.reconnect_interval)
                     continue
                 
