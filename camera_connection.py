@@ -128,42 +128,6 @@ class NetCamStudioConnection:
         
         return False
     
-    def test_snapshot(self):
-        """
-        Testa captura de snapshot antes de tentar o stream.
-        
-        Returns:
-            bool: True se conseguir capturar um snapshot
-        """
-        self.logger.info(f"Testando snapshot para câmera {self.camera_id}...")
-        
-        # Testar diferentes formatos de snapshot
-        snapshot_urls = [
-            self.stream_formats["snapshot"],
-            self.stream_formats["snapshot_auth"]
-        ]
-        
-        for url in snapshot_urls:
-            try:
-                self.logger.debug(f"Testando snapshot URL: {url}")
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code == 200 and len(response.content) > 1000:  # Assumir que uma imagem tem pelo menos 1KB
-                    self.logger.info(f"Snapshot capturado com sucesso para {self.camera_id}")
-                    return True
-                elif response.status_code == 401:
-                    self.logger.warning(f"Snapshot requer autenticação para {self.camera_id}")
-                    continue
-                else:
-                    self.logger.debug(f"Snapshot falhou: {response.status_code}")
-                    
-            except Exception as e:
-                self.logger.debug(f"Erro ao testar snapshot: {e}")
-                continue
-        
-        self.logger.warning(f"Não foi possível capturar snapshot para {self.camera_id}")
-        return False
-    
     def find_working_stream_url(self, timeout=30):
         """
         Tenta diferentes URLs de stream até encontrar uma que funcione.
@@ -247,13 +211,8 @@ class NetCamStudioConnection:
         if not self.test_web_server():
             return False
         
-        # Passo 2: Testar snapshot (opcional, mas ajuda a diagnosticar)
-        self.test_snapshot()
-        
-        # Passo 3: Tentar encontrar uma URL de stream que funcione
-        working_url = self.find_working_stream_url(timeout)
-        
-        if working_url:
+        # Passo 2: Encontrar uma URL de stream que funcione
+        if self.find_working_stream_url():
             self.logger.info(f"Conexão com stream do NetCam Studio X {self.camera_id} estabelecida com sucesso")
             return True
         else:
