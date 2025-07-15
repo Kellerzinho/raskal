@@ -29,28 +29,38 @@ class BuffetMonitoringSystem:
         self.dish_name_replacer = None
         self.api_server = None
         self.frame_processor = FrameProcessor()
+        self.dashboard_config = None
 
     def load_configs(self):
         """
         Carrega as configurações de câmeras e nomes de pratos.
         """
-        self.logger.info("Carregando configurações...")
         try:
-            # Carregar configuração das câmeras
-            with open(self.config_dir / "cameras.json", "r", encoding="utf-8") as f:
+            # Carrega configuração das câmeras
+            cameras_config_file = self.config_dir / "cameras.json"
+            with open(cameras_config_file, 'r') as f:
                 self.cameras_config = json.load(f)
             
             # Criar mapa de informações de câmera para fácil acesso
             self.camera_info_map = {
-                cam["id"]: {"name": cam.get("name", cam.get("id")), "dishes": cam.get("dishes", [])}
+                cam["id"]: cam
                 for cam in self.cameras_config.get("cameras", [])
             }
             
-            # Carregar e configurar o substituidor de nomes de pratos
-            nomes_path = self.config_dir / "nomes.json"
-            self.dish_name_replacer = DishNameReplacer(nomes_path)
+            # Carrega configuração do dashboard
+            dashboard_config_file = self.config_dir / "dashboard.json"
+            if dashboard_config_file.exists():
+                with open(dashboard_config_file, 'r') as f:
+                    self.dashboard_config = json.load(f)
+
+            # Carrega mapeamento de nomes de pratos
+            names_config_file = self.config_dir / "nomes.json"
+            if names_config_file.exists():
+                self.dish_name_replacer = DishNameReplacer(names_config_file)
+            else:
+                self.logger.warning("Arquivo de mapeamento de nomes não encontrado")
             
-            self.logger.info("Configurações carregadas com sucesso.")
+            self.logger.info("Configurações carregadas com sucesso")
         except FileNotFoundError as e:
             self.logger.error(f"Arquivo de configuração não encontrado: {e}")
             raise
@@ -121,13 +131,23 @@ class BuffetMonitoringSystem:
         self.logger.info("Iniciando threads das câmeras...")
         for camera in self.cameras_config["cameras"]:
             cam_id = camera["id"]
+            
+            # Configuração do dashboard
+            dashboard_url = None
+            auth_token = None
+            if self.dashboard_config:
+                dashboard_url = self.dashboard_config.get("url")
+                auth_token = self.dashboard_config.get("auth_token")
+            
             thread = CameraThread(
                 camera_id=cam_id,
                 camera_config=camera,
                 vision_processor=self.vision_processor,
                 camera_info_map=self.camera_info_map,
                 dish_name_replacer=self.dish_name_replacer,
-                frame_processor=self.frame_processor
+                frame_processor=self.frame_processor,
+                dashboard_url=dashboard_url,
+                auth_token=auth_token
             )
             self.camera_threads[cam_id] = thread
             thread.start()

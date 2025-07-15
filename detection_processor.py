@@ -19,6 +19,7 @@ from datetime import datetime
 
 # Importação ajustada para a nova estrutura
 from utils.dish_name_mapper import DishNameReplacer
+from api_client import ExternalAPIClient
 
 
 class DetectionProcessor:
@@ -27,7 +28,7 @@ class DetectionProcessor:
     Modificada para consolidar área máxima entre câmeras do mesmo prato.
     """
     
-    def __init__(self, camera_info, data_file="buffet_data.json", dish_name_replacer=None):
+    def __init__(self, camera_info, data_file="buffet_data.json", dish_name_replacer=None, dashboard_url=None, auth_token=None):
         """
         Inicializa o processador de detecções.
         
@@ -35,6 +36,8 @@ class DetectionProcessor:
             camera_info: Dicionário com informações das câmeras indexado por camera_id
             data_file: Caminho para o arquivo JSON onde os dados serão salvos
             dish_name_replacer: Instância de DishNameReplacer para traduzir nomes de pratos
+            dashboard_url: URL da API do dashboard externo
+            auth_token: Token de autenticação para a API do dashboard
         """
         self.logger = logging.getLogger(__name__)
         
@@ -48,6 +51,12 @@ class DetectionProcessor:
         self.data_file_lock = Lock()
         self.camera_info = camera_info
         self.dish_name_replacer = dish_name_replacer or DishNameReplacer() # Fallback para o caso de não ser fornecido
+        
+        # Inicializa o cliente da API do dashboard se a URL for fornecida
+        self.external_client = None
+        if dashboard_url:
+            self.external_client = ExternalAPIClient(dashboard_url, auth_token)
+            self.logger.info(f"Cliente da API do dashboard inicializado com URL: {dashboard_url}")
         
         # Configurações de fonte e linha para as detecções
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -64,19 +73,23 @@ class DetectionProcessor:
         
     def _init_data_file(self):
         """
-        Inicializa o arquivo de dados JSON se ele não existir.
+        Garante que o arquivo de dados JSON seja recriado a cada inicialização,
+        removendo qualquer registro de execuções anteriores.
         """
         with self.data_file_lock:
-            if not os.path.exists(self.data_file):
-                try:
-                    initial_data = {
-                        "address": []
-                    }
-                    with open(self.data_file, 'w') as f:
-                        json.dump(initial_data, f, indent=4)
-                    self.logger.info(f"Arquivo de dados criado: {self.data_file}")
-                except Exception as e:
-                    self.logger.error(f"Erro ao criar arquivo de dados: {e}")
+            try:
+                if os.path.exists(self.data_file):
+                    os.remove(self.data_file)
+                    self.logger.info(f"Arquivo de dados existente removido: {self.data_file}")
+                
+                initial_data = {
+                    "address": []
+                }
+                with open(self.data_file, 'w') as f:
+                    json.dump(initial_data, f, indent=4)
+                self.logger.info(f"Arquivo de dados recriado com sucesso: {self.data_file}")
+            except Exception as e:
+                self.logger.error(f"Erro ao recriar o arquivo de dados: {e}")
     
     def process_detections(self, frame, camera_id, boxes, class_names):
         """
@@ -267,58 +280,61 @@ class DetectionProcessor:
     
     def save_area_percentage(self, camera_id, dish_name, percentage):
         """
-        Salva a porcentagem de área para um prato no arquivo JSON de forma mais robusta e limpa.
-        Utiliza escrita atômica para evitar corrupção de dados.
+        Salva a porcentagem de área de um prato no arquivo JSON.
+        Agora usa o nome do restaurante da configuração da câmera.
         """
-        iso_timestamp = datetime.now().isoformat()
-        
         try:
             with self.data_file_lock:
-                data = {"address": []}
-                if os.path.exists(self.data_file) and os.path.getsize(self.data_file) > 0:
-                    try:
+                # Carrega os dados existentes
                         with open(self.data_file, 'r') as f:
                             data = json.load(f)
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Arquivo JSON corrompido ({self.data_file}). Será sobrescrito.")
-                
-                camera_details = self.camera_info.get(camera_id, {})
-                restaurant_id = camera_details.get("restaurant", "default")
-                location_name = camera_details.get("location_name", f"Local {camera_id}")
 
-                restaurant_obj = next((r for r in data.get("address", []) if r.get("restaurant") == restaurant_id), None)
-                if not restaurant_obj:
-                    restaurant_obj = {"restaurant": restaurant_id, "locations": []}
-                    data["address"].append(restaurant_obj)
+                # Obtém o nome do restaurante da configuração da câmera
+                restaurant_name = self.camera_info[camera_id]["restaurant"]
+                location_name = self.camera_info[camera_id].get("location_name", f"Local {camera_id}")
 
-                location_obj = next((loc for loc in restaurant_obj.get("locations", []) if loc.get("location_id") == camera_id), None)
-                if not location_obj:
-                    location_obj = {
-                        "location_id": camera_id,
-                        "location_name": location_name,
-                        "dishes": []
-                    }
-                    restaurant_obj["locations"].append(location_obj)
+                # Procura o restaurante na lista
+                restaurant_found = False
+                for address in data["address"]:
+                    if address["name"] == restaurant_name:
+                        restaurant_found = True
+                        # Procura o local na lista do restaurante
+                        location_found = False
+                        for location in address["locations"]:
+                            if location["name"] == location_name:
+                                location_found = True
+                                # Atualiza a porcentagem do prato
+                                location["dishes"][dish_name] = percentage
+                                break
+                        if not location_found:
+                            # Adiciona novo local se não encontrado
+                            address["locations"].append({
+                                "name": location_name,
+                                "dishes": {dish_name: percentage}
+                            })
+                        break
 
-                dish_data = {
-                    "dish_id": f"{camera_id}_{dish_name}",
-                    "dish_name": dish_name,
-                    "percentage_remaining": int(percentage * 100),
-                    "needs_reposition": int(percentage < 0.5),
-                    "timestamp": iso_timestamp
-                }
-                
-                location_obj["dishes"] = [d for d in location_obj["dishes"] if d.get("dish_name") != dish_name]
-                location_obj["dishes"].append(dish_data)
+                if not restaurant_found:
+                    # Adiciona novo restaurante se não encontrado
+                    data["address"].append({
+                        "name": restaurant_name,
+                        "locations": [{
+                            "name": location_name,
+                            "dishes": {dish_name: percentage}
+                        }]
+                    })
 
-                temp_file_path = self.data_file + ".tmp"
-                with open(temp_file_path, 'w') as f:
+                # Salva os dados atualizados
+                with open(self.data_file, 'w') as f:
                     json.dump(data, f, indent=4)
                 
-                os.replace(temp_file_path, self.data_file)
+                # Envia os dados para a API externa se configurada
+                if self.external_client:
+                    if self.external_client.send_data(data):
+                        self.logger.info(f"Dados enviados com sucesso para o dashboard: {restaurant_name} - {location_name} - {dish_name}: {percentage:.1%}")
                     
         except Exception as e:
-            self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}", exc_info=True)
+            self.logger.error(f"Erro ao salvar dados no arquivo JSON: {e}")
     
     def load_area_data(self, restaurant_id=None, camera_id=None, dish_id=None):
         """

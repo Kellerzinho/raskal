@@ -40,13 +40,12 @@ class ExternalAPIClient:
                 )
                 
                 if response.status_code in (200, 201):
-                    logger.info(f"Dados enviados com sucesso para a API externa ({endpoint}): {response.status_code}")
                     self.last_sync_time = current_time
                     return True
                 else:
-                    logger.error(f"Falha ao enviar dados ({endpoint}): {response.status_code} - {response.text}")
+                    logger.error(f"Erro na resposta da API: {response.status_code} - {response.text}")
                     return False
                     
             except Exception as e:
-                logger.error(f"Erro ao enviar dados para API externa ({endpoint}): {str(e)}")
+                logger.error(f"Erro na conexão com a API: {str(e)}")
                 return False
