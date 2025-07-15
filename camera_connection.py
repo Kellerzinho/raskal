@@ -258,28 +258,7 @@ class NetCamStudioConnection:
             return True
         else:
             self.logger.error(f"Falha ao estabelecer conexão com stream do NetCam Studio X {self.camera_id}")
-            self.print_troubleshooting_tips()
             return False
-    
-    def print_troubleshooting_tips(self):
-        """
-        Imprime dicas de solução de problemas.
-        """
-        self.logger.error("=== DICAS DE SOLUÇÃO DE PROBLEMAS ===")
-        self.logger.error("1. Verifique se o NetCam Studio X está executando")
-        self.logger.error("2. Habilite o Web Server nas configurações:")
-        self.logger.error("   - Abra NetCam Studio X")
-        self.logger.error("   - Vá em Settings/Options")
-        self.logger.error("   - Procure por 'Web Server' ou 'HTTP Server'")
-        self.logger.error("   - Certifique-se de que está habilitado")
-        self.logger.error(f"3. Verifique se a porta {self.port} está correta")
-        self.logger.error(f"4. Verifique se o source_id {self.source_id} existe")
-        self.logger.error("5. Teste manualmente no navegador:")
-        self.logger.error(f"   - http://{self.ip}:{self.port}")
-        self.logger.error(f"   - http://{self.ip}:{self.port}/Mjpeg/{self.source_id}")
-        self.logger.error("6. Verifique firewall e antivírus")
-        self.logger.error("7. Para versão gratuita: apenas 2 câmeras são suportadas para stream")
-        self.logger.error("========================================")
     
     @property
     def stream_url(self):
