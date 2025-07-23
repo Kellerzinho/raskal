@@ -19,13 +19,6 @@ class LoggerManager:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
         
-        # Configurar o root logger
-        self.setup_root_logger()
-        
-        # Obter um logger para esta classe
-        self.logger = logging.getLogger(__name__)
-        self.logger.debug("Sistema de logging inicializado")
-    
     def setup_root_logger(self, console_level=logging.INFO):
         """
         Configura o root logger com handlers, formatter e filter.
@@ -75,4 +68,7 @@ class LoggerManager:
         
         # Adicionar handlers ao root logger
         root_logger.addHandler(console_handler)
-        root_logger.addHandler(file_handler) 
+        root_logger.addHandler(file_handler)
+        
+        # Log de inicialização movido para cá para garantir que seja registrado
+        logging.getLogger(__name__).debug("Sistema de logging inicializado e configurado.") 

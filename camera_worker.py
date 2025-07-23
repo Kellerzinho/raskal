@@ -12,7 +12,7 @@ class CameraThread(threading.Thread):
     Versão modificada que nunca encerra a thread, tentando continuamente reconectar.
     """
     
-    def __init__(self, camera_id, camera_config, vision_processor, detection_processor, frame_processor):
+    def __init__(self, camera_id, camera_config, vision_processor, detection_processor, frame_processor, status_monitor):
         """
         Inicializa a thread para uma câmera.
         
@@ -22,6 +22,7 @@ class CameraThread(threading.Thread):
             vision_processor: Processador de visão computacional (YOLOProcessor)
             detection_processor: Processador de detecções para salvar dados (instância centralizada)
             frame_processor: Instância do processador de frames para anotações
+            status_monitor: Instância do monitor de status para reportar o estado da câmera.
         """
         super().__init__(name=f"CameraThread-{camera_id}")
         self.logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class CameraThread(threading.Thread):
         self.current_annotated_frame = None
         self.frame_lock = threading.Lock()
         
+        self.status_monitor = status_monitor
         self.reconnect_interval = 5
         self.connection_attempts = 0
         self.max_consecutive_failures = 5
@@ -59,9 +61,8 @@ class CameraThread(threading.Thread):
         self.logger.debug(f"Thread da câmera {self.camera_id} iniciada")
         self.running = True
         
-        # A inicialização do detection_processor foi movida para o BuffetMonitoringSystem
-        
         while self.running:
+            self.status_monitor.update_status(self.camera_id, status="Offline", connecting=True)
             try:
                 camera = CameraConnection(self.camera_config)
             
@@ -77,6 +78,7 @@ class CameraThread(threading.Thread):
                 stream_success = camera.try_connect_to_stream(timeout=40)
                 
                 if not stream_success:
+                    self.status_monitor.update_status(self.camera_id, status="Offline", connecting=True)
                     self.logger.warning(f"Falha ao conectar à stream da câmera {self.camera_id}. Tentando novamente em {self.reconnect_interval} segundos...")
                     
                     # Gera um frame de status de falha
@@ -87,6 +89,7 @@ class CameraThread(threading.Thread):
                     time.sleep(self.reconnect_interval)
                     continue
                 
+                self.status_monitor.update_status(self.camera_id, status="Online", connecting=False)
                 self.logger.debug(f"Conexão com a stream da câmera {self.camera_id} estabelecida com sucesso")
                 
                 if self.vision_processor:
@@ -129,9 +132,10 @@ class CameraThread(threading.Thread):
 
                 if not ret:
                     self.consecutive_failures += 1
-                    self.logger.warning(f"Falha ao ler frame da câmera {self.camera_id} ({self.consecutive_failures}/{self.max_consecutive_failures}).")
+                    self.logger.debug(f"Falha ao ler frame da câmera {self.camera_id} ({self.consecutive_failures}/{self.max_consecutive_failures}).")
                     if self.consecutive_failures >= self.max_consecutive_failures:
-                        self.logger.error(f"Atingido o limite de falhas consecutivas para {self.camera_id}. Reiniciando conexão completa.")
+                        self.status_monitor.update_status(self.camera_id, status="Offline", connecting=True)
+                        self.logger.debug(f"Atingido o limite de falhas consecutivas para {self.camera_id}. Reiniciando conexão completa.")
                         break  # Sai do loop de processamento para forçar reconexão no método run()
                     
                     time.sleep(1)  # Pausa para evitar um loop muito rápido em caso de falha
@@ -198,7 +202,7 @@ class CameraThread(threading.Thread):
         # Garante que o recurso seja liberado ao sair
         if cap:
             cap.release()
-        self.logger.warning(f"Processamento de frames da câmera {self.camera_id} interrompido. Retornando ao gerenciador de conexão.")
+        self.logger.debug(f"Processamento de frames da câmera {self.camera_id} interrompido. Retornando ao gerenciador de conexão.")
 
     def get_current_frame(self):
         """
@@ -218,4 +222,5 @@ class CameraThread(threading.Thread):
         """
         Para a execução da thread.
         """
-        self.running = False 
+        self.running = False
+        self.status_monitor.update_status(self.camera_id, status="Offline", connecting=False) 

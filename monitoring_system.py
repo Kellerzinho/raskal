@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 import cv2
+from datetime import datetime, timedelta
 
 # Importações refatoradas
 from api_server import APIServer
@@ -11,6 +12,7 @@ from camera_worker import CameraThread
 from vision_model import YOLOProcessor
 from utils.dish_name_mapper import DishNameReplacer
 from detection_processor import FrameProcessor, DetectionProcessor
+from utils.status_monitor import StatusMonitor
 
 class BuffetMonitoringSystem:
     """
@@ -24,13 +26,69 @@ class BuffetMonitoringSystem:
         self.running = False
         self.cameras_config = None
         self.camera_threads = {}
-        self.vision_processor = None
-        self.camera_info_map = {}
-        self.dish_name_replacer = None
-        self.api_server = None
+        self.last_displayed_frame_time = {}
+        
         self.frame_processor = FrameProcessor()
-        self.dashboard_config = None
-        self.detection_processor = None # Adicionado para centralizar
+        self.dish_name_replacer = None
+        self.status_monitor = None
+        
+        self.logger.info("Carregando configurações...")
+        self.load_configs()
+        self.initialize_components() # Novo método para inicializar componentes
+        
+        self.running = True
+        
+        # O try/finally garante que o método stop seja chamado ao sair
+        try:
+            self.start_camera_threads()
+            self.start_api_server()
+            
+            # Inicia o monitor de status *depois* que tudo estiver pronto
+            if self.status_monitor:
+                self.status_monitor.start()
+
+            if self.show_visualization:
+                self.logger.info("Visualização ativada. Pressione 'q' na janela para sair.")
+                
+                # Dimensões para redimensionamento
+                target_height = 360  # Altura padrão para cada frame na grade
+
+                while self.running:
+                    frames_to_show = []
+                    # Coleta os frames mais recentes de todas as threads
+                    for cam_id, thread in self.camera_threads.items():
+                        frame = thread.get_annotated_frame()
+                        # A verificação de None foi removida, pois a thread agora sempre tem um frame
+                        
+                        # Redimensiona o frame para uma altura padrão, mantendo a proporção
+                        h, w, _ = frame.shape
+                        scale = target_height / h
+                        target_width = int(w * scale)
+                        resized_frame = cv2.resize(frame, (target_width, target_height))
+                        frames_to_show.append(resized_frame)
+                    
+                    if frames_to_show:
+                        # Concatena os frames em uma única imagem
+                        combined_frame = self.frame_processor.concat_frames(frames_to_show)
+                        if combined_frame is not None and combined_frame.size > 0:
+                            cv2.imshow("Buffet Monitor", combined_frame)
+                    
+                    # O waitKey é crucial para que o OpenCV processe os eventos da janela
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        self.logger.info("Tecla 'q' pressionada. Encerrando...")
+                        self.stop()
+                        break
+                    
+                    # Pequena pausa para não sobrecarregar a CPU
+                    time.sleep(0.02)
+            else:
+                # Modo headless
+                while self.running:
+                    time.sleep(1)
+        finally:
+            if self.running:
+                self.logger.info("Encerrando o sistema a partir do bloco finally...")
+                self.stop()
 
     def load_configs(self):
         """
@@ -99,6 +157,39 @@ class BuffetMonitoringSystem:
         )
         self.logger.info("Processador de detecção centralizado inicializado.")
 
+        # Inicializar o monitor de status com os IDs das câmeras
+        camera_ids = [cam["id"] for cam in self.cameras_config.get("cameras", [])]
+        self.status_monitor = StatusMonitor(camera_ids)
+
+        self.stop_event = threading.Event()
+
+        # Adiciona o scheduler para limpeza diária
+        self.cleanup_thread = threading.Thread(target=self._daily_cleanup_scheduler, daemon=True)
+
+    def _daily_cleanup_scheduler(self):
+        """
+        Verifica a cada minuto se é meia-noite para executar a rotina de limpeza.
+        """
+        self.logger.info("Agendador de limpeza diária iniciado.")
+        while not self.stop_event.is_set():
+            # Calcula a próxima meia-noite
+            now = datetime.now()
+            next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Checa se a hora atual está próxima da meia-noite (margem de 1 minuto para garantir execução)
+            if now.hour == 0 and now.minute == 0:
+                self.logger.info("Meia-noite alcançada. Executando limpeza de dados diários.")
+                try:
+                    self.detection_processor.reset_daily_data()
+                    self.logger.info("Limpeza diária concluída com sucesso.")
+                    # Dorme por um pouco mais de um minuto para não rodar de novo no mesmo minuto
+                    time.sleep(61)
+                except Exception as e:
+                    self.logger.error(f"Ocorreu um erro durante a execução da limpeza diária: {e}")
+            
+            # Dorme por 60 segundos antes de checar novamente
+            time.sleep(60)
+        self.logger.info("Agendador de limpeza diária finalizado.")
 
     def check_cuda(self):
         """
@@ -161,17 +252,18 @@ class BuffetMonitoringSystem:
         Inicia uma thread para cada câmera configurada, passando o processador de detecção.
         """
         self.logger.info("Iniciando threads das câmeras...")
-        for camera in self.cameras_config["cameras"]:
-            cam_id = camera["id"]
-            
+        self.cleanup_thread.start()
+        for camera_config in self.cameras_config.get("cameras", []):
+            camera_id = camera_config["id"]
             thread = CameraThread(
-                camera_id=cam_id,
-                camera_config=camera,
-                vision_processor=self.vision_processor,
-                detection_processor=self.detection_processor, # Passa a instância central
-                frame_processor=self.frame_processor
+                camera_id, 
+                camera_config, 
+                self.vision_processor, 
+                self.detection_processor,
+                self.frame_processor,
+                self.status_monitor
             )
-            self.camera_threads[cam_id] = thread
+            self.camera_threads[camera_id] = thread
             thread.start()
         self.logger.info(f"{len(self.camera_threads)} threads de câmera iniciadas.")
 
@@ -249,35 +341,32 @@ class BuffetMonitoringSystem:
 
     def stop(self):
         """
-        Para todos os componentes do sistema.
+        Para todas as threads e encerra o sistema de forma limpa.
         """
         if not self.running:
-            return
-            
-        self.running = False
-        self.logger.info("Iniciando processo de encerramento do sistema...")
-
-        # Parar threads das câmeras
-        self.logger.info("Parando threads das câmeras...")
-        for cam_id, thread in self.camera_threads.items():
-            if thread.is_alive():
-                thread.stop()
+            return  # Evita chamadas múltiplas
         
-        # Encerramento do processador de detecção (se necessário)
-        if self.detection_processor:
-            self.logger.info("Encerrando o processador de detecção...")
-            # Adicionar aqui qualquer lógica de limpeza, como salvar um estado final
-            # Ex: self.detection_processor.shutdown()
+        self.logger.info("Iniciando o processo de encerramento do sistema...")
+        self.running = False
+        
+        self.stop_event.set()
+        
+        if hasattr(self, 'api_server') and self.api_server:
+            self.api_server.stop()
 
-        # Aguardar as threads terminarem
-        for cam_id, thread in self.camera_threads.items():
-            thread.join(timeout=5)
-            if thread.is_alive():
-                self.logger.warning(f"Thread da câmera {cam_id} não respondeu ao comando de parada.")
+        if self.status_monitor:
+            self.status_monitor.stop()
 
-        # O servidor da API é uma thread daemon, então ele será encerrado automaticamente.
-        # Se fosse necessário um encerramento gracioso, seria implementado aqui.
-        self.logger.info("Servidor da API será encerrado.")
+        self.logger.info("Aguardando finalização das threads das câmeras...")
+        for thread in self.camera_threads.values():
+            thread.stop()
+            thread.join()
+        
+        if hasattr(self, 'cleanup_thread') and self.cleanup_thread.is_alive():
+            self.logger.info("Aguardando finalização da thread de limpeza...")
+            self.cleanup_thread.join(timeout=5)
+
+        self.logger.info("Todas as threads foram finalizadas.")
 
         # Fechar janelas de visualização
         cv2.destroyAllWindows()

@@ -119,12 +119,12 @@ class NetCamStudioConnection:
                 self.logger.debug(f"Erro inesperado ao testar {test_url}: {e}")
                 continue
         
-        self.logger.error(f"Web server do NetCam Studio X {self.camera_id} não está respondendo ou não está habilitado")
-        self.logger.error(f"Verifique se:")
-        self.logger.error(f"1. NetCam Studio X está executando")
-        self.logger.error(f"2. Web Server está habilitado nas configurações")
-        self.logger.error(f"3. A porta {self.port} está correta")
-        self.logger.error(f"4. Não há firewall bloqueando a conexão")
+        self.logger.debug(f"Web server do NetCam Studio X {self.camera_id} não está respondendo ou não está habilitado")
+        self.logger.debug(f"Verifique se:")
+        self.logger.debug(f"1. NetCam Studio X está executando")
+        self.logger.debug(f"2. Web Server está habilitado nas configurações")
+        self.logger.debug(f"3. A porta {self.port} está correta")
+        self.logger.debug(f"4. Não há firewall bloqueando a conexão")
         
         return False
     
@@ -192,7 +192,7 @@ class NetCamStudioConnection:
                 self.logger.debug(f"Erro ao testar formato {format_name}: {e}")
                 continue
         
-        self.logger.error(f"Nenhum formato de stream funcionou para {self.camera_id}")
+        self.logger.debug(f"Nenhum formato de stream funcionou para {self.camera_id}")
         return None
     
     def try_connect_to_stream(self, timeout=40):
@@ -216,7 +216,7 @@ class NetCamStudioConnection:
             self.logger.debug(f"Conexão com stream do NetCam Studio X {self.camera_id} estabelecida com sucesso")
             return True
         else:
-            self.logger.error(f"Falha ao estabelecer conexão com stream do NetCam Studio X {self.camera_id}")
+            self.logger.debug(f"Falha ao estabelecer conexão com stream do NetCam Studio X {self.camera_id}")
             return False
     
     @property
@@ -239,7 +239,7 @@ class NetCamStudioConnection:
             cv2.VideoCapture: Objeto configurado ou None se não houver stream ativo
         """
         if not self.active_stream_url:
-            self.logger.error(f"Nenhum stream ativo para {self.camera_id}")
+            self.logger.debug(f"Nenhum stream ativo para {self.camera_id}")
             return None
         
         cap = cv2.VideoCapture(self.active_stream_url)
@@ -256,7 +256,7 @@ class NetCamStudioConnection:
                 
             return cap
         else:
-            self.logger.error(f"Não foi possível abrir capture para {self.camera_id}")
+            self.logger.debug(f"Não foi possível abrir capture para {self.camera_id}")
             return None
     
     def get_status(self):

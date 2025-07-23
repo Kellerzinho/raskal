@@ -488,6 +488,34 @@ class DetectionProcessor:
             )
         return annotated_frame
 
+    def reset_daily_data(self):
+        """
+        Apaga o arquivo de dados JSON e re-inicializa o estado interno.
+        Ideal para ser chamado diariamente para começar um novo registro.
+        """
+        self.logger.info("Executando limpeza diária dos dados de detecção.")
+        
+        with self.data_file_lock:
+            # Apaga o arquivo de dados se ele existir
+            if os.path.exists(self.data_file):
+                try:
+                    os.remove(self.data_file)
+                    self.logger.info(f"Arquivo de dados '{self.data_file}' apagado com sucesso.")
+                except OSError as e:
+                    self.logger.error(f"Erro ao apagar o arquivo de dados '{self.data_file}': {e}")
+            
+            # Re-inicializa o cache de áreas máximas
+            self.max_areas = {}
+            self.logger.info("Cache de áreas máximas foi re-inicializado.")
+
+            # Cria um arquivo vazio para garantir que ele exista para o próximo ciclo
+            try:
+                with open(self.data_file, 'w') as f:
+                    json.dump({}, f)
+                self.logger.info(f"Arquivo de dados '{self.data_file}' recriado vazio.")
+            except IOError as e:
+                self.logger.error(f"Não foi possível recriar o arquivo de dados '{self.data_file}': {e}")
+
 
 class FrameProcessor:
     """
