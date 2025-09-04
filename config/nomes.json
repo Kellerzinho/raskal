@@ -1,12 +1,6 @@
 {
-	"cam1PratoD":"pizza",
-	"cam1PratoE":"quesadilla",	
-	"cam2PratoS":"tomate_cereja",	
-	"cam3PratoD":"ovo_cozido",	
-	"cam3PratoE":"atum_grelhado",	
-	"cam4PratoS":"legumes_variados",	
-	"cam5PratoS":"batata",	
-	"cam6PratoD":"presunto",	
-	"cam6PratoE1":"mortadela",
-	"cam6PratoE2":"presunto"
+	"Atum": "atum_selado",
+	"carpaccio": "carpaccio",
+	"parma": "presunto_parma",
+	"presunto": "presunto"
 }

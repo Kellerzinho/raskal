@@ -152,12 +152,15 @@ class CameraThread(threading.Thread):
                     # Se houver detecções, processá-las e armazená-las para persistência
                     self.last_boxes = results[0].boxes
                     self.last_model_names = self.vision_processor.model.names
+                    # Tentar obter máscaras do resultado (segmentação)
+                    result_masks = getattr(results[0], 'masks', None)
                     
                     annotated_frame, stats = self.detection_processor.process_detections(
                         frame.copy(),
                         self.camera_id,
                         self.last_boxes,
-                        self.last_model_names
+                        self.last_model_names,
+                        masks=result_masks
                     )
                     
                     # Capturar as porcentagens calculadas para usar nas caixas persistentes
@@ -170,13 +173,26 @@ class CameraThread(threading.Thread):
                 else:
                     # Se não houver detecções, usar as últimas caixas conhecidas
                     if self.last_boxes is not None:
-                        annotated_frame = self.detection_processor.draw_persistent_boxes(
-                            frame.copy(),
-                            self.last_boxes,
-                            self.last_model_names,
-                            self.camera_id,
-                            self.last_percentages
-                        )
+                        result_masks = None
+                        if results and hasattr(results[0], 'masks'):
+                            result_masks = getattr(results[0], 'masks', None)
+                        if result_masks is not None:
+                            annotated_frame = self.detection_processor.draw_persistent_masks(
+                                frame.copy(),
+                                self.last_boxes,
+                                result_masks,
+                                self.last_model_names,
+                                self.camera_id,
+                                self.last_percentages
+                            )
+                        else:
+                            annotated_frame = self.detection_processor.draw_persistent_boxes(
+                                frame.copy(),
+                                self.last_boxes,
+                                self.last_model_names,
+                                self.camera_id,
+                                self.last_percentages
+                            )
                     else:
                         # Se não houver detecções nem caixas antigas, o frame é uma cópia
                         annotated_frame = frame.copy()

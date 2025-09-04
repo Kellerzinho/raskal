@@ -135,7 +135,7 @@ class BuffetMonitoringSystem:
         
         # Inicializa o processador de visão (YOLO)
         try:
-            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt")
+            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt", retina_masks=True)
             self.logger.info("Processador de visão (YOLO) inicializado.")
         except Exception as e:
             self.logger.error(f"Falha ao inicializar o processador de visão: {e}", exc_info=True)
@@ -199,7 +199,7 @@ class BuffetMonitoringSystem:
         try:
             # Esta é uma maneira simplificada. A lógica real pode estar dentro de YOLOProcessor.
             # Supondo que YOLOProcessor lida com a seleção de dispositivo (CPU/GPU).
-            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt")
+            self.vision_processor = YOLOProcessor(model_path="models/FVBM.pt", retina_masks=True)
             # A lógica original para verificar torch e cuda foi abstraída para dentro do YOLOProcessor
             self.logger.info("Processador de visão (YOLO) inicializado.")
         except Exception as e:

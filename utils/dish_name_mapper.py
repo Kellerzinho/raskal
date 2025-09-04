@@ -63,5 +63,12 @@ class DishNameReplacer:
             str: O nome traduzido ou o nome original.
         """
         with self.names_lock:
-            # Retorna o nome do dicionário, ou a 'original_name' como padrão.
+            # Usa somente o mapeamento definido no JSON
             return self.dish_names.get(original_name, original_name)
+
+    def get_all_original_names(self):
+        """
+        Retorna a lista de nomes originais conhecidos a partir do JSON.
+        """
+        with self.names_lock:
+            return list(self.dish_names.keys())

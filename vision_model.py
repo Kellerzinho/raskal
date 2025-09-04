@@ -16,7 +16,7 @@ class YOLOProcessor:
     Classe responsável por carregar e gerenciar o modelo YOLOv11x para detecção de objetos.
     """
     
-    def __init__(self, model_path="models/FVBM.pt", use_cuda=False, conf_threshold=0.5, iou_threshold=0.45):
+    def __init__(self, model_path="models/FVBM.pt", use_cuda=False, conf_threshold=0.5, iou_threshold=0.45, retina_masks=True):
         """
         Inicializa o processador YOLO.
         
@@ -34,6 +34,7 @@ class YOLOProcessor:
         self.device = None
         self.model = None
         self.class_names = []
+        self.retina_masks = retina_masks
         
         # Inicializar o modelo
         self._load_model()
@@ -91,20 +92,19 @@ class YOLOProcessor:
             Os resultados da detecção do modelo.
         """
         if self.model:
-            return self.model(frame, verbose=False)
+            # Ativa máscaras retina para segmentação em resolução do frame
+            try:
+                return self.model(frame, verbose=False, retina_masks=self.retina_masks)
+            except TypeError:
+                # Compatibilidade caso a versão da lib não aceite o parâmetro
+                return self.model(frame, verbose=False)
         self.logger.warning("Modelo de visão não está carregado. Retornando None.")
         return None
 
     def get_annotated_frame(self, results):
         """
-        Desenha as anotações (bounding boxes) nos resultados da detecção.
-        
-        Args:
-            results: O objeto de resultados retornado por process_frame.
-            
-        Returns:
-            O frame com as anotações desenhadas.
+        Método legado não utilizado: a anotação final passou para o DetectionProcessor.
+        Mantido por compatibilidade de interface, retorna None.
         """
-        if results and len(results) > 0:
-            return results[0].plot()
+        self.logger.debug("get_annotated_frame não é mais utilizado; anotações são feitas no DetectionProcessor")
         return None

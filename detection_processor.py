@@ -13,7 +13,7 @@ import numpy as np
 import time
 import json
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: F401 (compat: pode ser usado em futuras funcionalidades)
 from threading import Lock
 from datetime import datetime
 
@@ -91,7 +91,7 @@ class DetectionProcessor:
             except Exception as e:
                 self.logger.error(f"Erro ao recriar o arquivo de dados: {e}")
     
-    def process_detections(self, frame, camera_id, boxes, class_names):
+    def process_detections(self, frame, camera_id, boxes, class_names, masks=None):
         """
         Processa as detecções do YOLO, desenha no frame e calcula estatísticas.
         Agora agrupa por nome original de prato para salvar IDs corretos.
@@ -114,29 +114,60 @@ class DetectionProcessor:
 
         stats['total_detections'] = len(boxes)
 
-        # Dicionário para acumular áreas por nome de prato ORIGINAL
+        # Dicionários para acumular por nome de prato ORIGINAL
         dish_areas_by_original_name = {}  # key: original_class_name, value: total_area
-        all_detections_by_original_name = {} # key: original_class_name, value: list of (bbox, confidence)
+        detections_by_original_name = {}   # key: original_class_name, value: list of dicts com bbox/mask/score
+        label_boxes_by_original_name = {}  # key: original_class_name, value: bbox de referência (união)
 
 
         # Primeira passagem: acumular áreas e informações de detecção por nome original
+        have_masks = hasattr(masks, 'data') and masks is not None
+        mask_data = None
+        if have_masks:
+            try:
+                mask_data = masks.data.cpu().numpy()  # (N, H, W) com valores 0..1
+            except Exception:
+                mask_data = None
+                have_masks = False
+
+        detected_original_names = set()
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             confidence = boxes.conf[i].item()
             class_id = int(boxes.cls[i].item())
             original_class_name = class_names[class_id]
-            
-            area = self.calculate_area(bbox)
-            
-            # Acumula a área total para este prato (pelo nome original)
+            detected_original_names.add(original_class_name)
+
+            # Área via máscara se disponível, senão bbox (legado)
+            mask_area = 0
+            instance_mask = None
+            if have_masks and mask_data is not None and i < len(mask_data):
+                instance_mask = (mask_data[i] >= 0.5).astype(np.uint8)  # binária
+                mask_area = int(instance_mask.sum())
+
+            area = mask_area if mask_area > 0 else self.calculate_area(bbox)
+
             dish_areas_by_original_name.setdefault(original_class_name, 0)
             dish_areas_by_original_name[original_class_name] += area
 
-            # Agrupa detecções pelo nome original
-            all_detections_by_original_name.setdefault(original_class_name, [])
-            all_detections_by_original_name[original_class_name].append((bbox, confidence))
+            detections_by_original_name.setdefault(original_class_name, [])
+            detections_by_original_name[original_class_name].append({
+                'bbox': bbox,
+                'confidence': confidence,
+                'mask': instance_mask
+            })
 
-            # Para estatísticas, usa o nome traduzido
+            # Atualiza caixa de rótulo (união de bboxes por prato)
+            if original_class_name not in label_boxes_by_original_name:
+                label_boxes_by_original_name[original_class_name] = bbox.copy()
+            else:
+                x1, y1, x2, y2 = label_boxes_by_original_name[original_class_name]
+                nx1, ny1, nx2, ny2 = bbox
+                label_boxes_by_original_name[original_class_name] = np.array([
+                    min(x1, nx1), min(y1, ny1), max(x2, nx2), max(y2, ny2)
+                ])
+
+            # Estatísticas por nome traduzido
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
             stats['classes'].setdefault(dish_name, 0)
             stats['classes'][dish_name] += 1
@@ -162,56 +193,130 @@ class DetectionProcessor:
                     'percentage': area_percentage
                 })
 
-            # Desenha todas as detecções individuais no frame
-            for bbox, confidence in all_detections_by_original_name[original_class_name]:
-                annotated_frame = self.draw_detection(
-                    frame=annotated_frame,
-                    label_text=f"{dish_name} (Total: {area_percentage:.1%})",
-                    color_key=original_class_name,
-                    confidence=confidence,
-                    bbox=bbox
+            # Desenha overlays das máscaras/caixas por detecção
+            for det in detections_by_original_name.get(original_class_name, []):
+                if det['mask'] is not None:
+                    annotated_frame = self.draw_mask_overlay(annotated_frame, det['mask'])
+                else:
+                    # Fallback: desenha bbox leve
+                    x1, y1, x2, y2 = map(int, det['bbox'])
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            # Desenha UM rótulo por prato, no canto superior da bbox unificada
+            if original_class_name in label_boxes_by_original_name:
+                x1, y1, x2, y2 = map(int, label_boxes_by_original_name[original_class_name])
+                label_text = f"{dish_name} ({area_percentage:.0%})"
+                annotated_frame = self.draw_label_box(
+                    annotated_frame,
+                    x1,
+                    y1,
+                    label_text
                 )
 
+        # Após processar os detectados, enviar 0% para pratos esperados (já conhecidos) ausentes
+        try:
+            absent_original_names = self._get_absent_known_originals(camera_id, detected_original_names)
+            for original_class_name in absent_original_names:
+                dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+                # Só atualiza se já temos calibração (evita criar max_area=0)
+                with self.max_areas_lock:
+                    has_calibration = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
+                if not has_calibration:
+                    continue
+
+                area_percentage = self.update_consolidated_max_area(dish_name, camera_id, 0)
+                # Grava se esta câmera for a melhor para o prato (pode ou não gravar, conforme regra global)
+                self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
+                stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
+                if area_percentage < 0.3:
+                    stats['needs_refill'].append({
+                        'id': f"{camera_id}_{original_class_name}",
+                        'class': dish_name,
+                        'percentage': area_percentage
+                    })
+        except Exception as e:
+            self.logger.error(f"Falha ao processar ausentes 0%: {e}")
+
         return annotated_frame, stats
+
+    def _get_absent_known_originals(self, camera_id, detected_original_names):
+        """
+        Retorna o conjunto de nomes originais (do modelo) já conhecidos para a câmera
+        que não apareceram nas detecções atuais.
+        Baseado no arquivo JSON atual (ou seja, pratos já vistos/registrados anteriormente).
+        """
+        known_originals = set()
+        try:
+            data = self.load_area_data(camera_id=camera_id)
+            for restaurant in data.get('address', []):
+                for location in restaurant.get('locations', []):
+                    if location.get('location_id') != camera_id:
+                        continue
+                    for dish in location.get('dishes', []):
+                        dish_id = dish.get('dish_id', '')
+                        prefix = f"{camera_id}_"
+                        if dish_id.startswith(prefix):
+                            original = dish_id[len(prefix):]
+                            if original:
+                                known_originals.add(original)
+        except Exception as e:
+            self.logger.error(f"Erro obtendo pratos conhecidos para {camera_id}: {e}")
+            return set()
+
+        # Ausentes = conhecidos - detectados
+        return known_originals.difference(detected_original_names)
+
+        
+        
     
     def draw_detection(self, frame, label_text, color_key, confidence, bbox):
-        """
-        Desenha uma detecção no frame com bounding box, classe e porcentagem.
-        - label_text: O texto a ser exibido (ex: "Arroz Branco (Total: 85%)").
-        - color_key: Não mais utilizado, todas as detecções são verdes.
-        """
+        # Método legado: manter compatibilidade chamando draw_label_box no topo da bbox
         x1, y1, x2, y2 = map(int, bbox)
-        
-        # Cor verde fixa para todas as detecções
-        color_bgr = (255, 255, 255)
-        
-        # Desenha a bounding box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, self.line_thickness)
-        
-        # Calcula o tamanho do texto completo
-        text_size, _ = cv2.getTextSize(label_text, self.font, self.font_scale, self.font_thickness)
+        return self.draw_label_box(frame, x1, y1, label_text)
+
+    def draw_mask_overlay(self, frame, mask_binary):
+        """
+        Desenha overlay semi-transparente e contorno de uma máscara binária no frame.
+        """
+        if mask_binary is None:
+            return frame
+
+        h, w = frame.shape[:2]
+        if mask_binary.shape != (h, w):
+            # Ajusta máscara se necessário
+            mask_resized = cv2.resize(mask_binary, (w, h), interpolation=cv2.INTER_NEAREST)
+        else:
+            mask_resized = mask_binary
+
+        overlay = frame.copy()
+        color = (0, 255, 0)  # verde
+        # Aplica cor onde mask==1
+        colored = np.zeros_like(frame)
+        colored[:, :] = color
+        overlay = np.where(mask_resized[:, :, None] == 1, colored, overlay)
+        # Alpha blend 50%
+        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+        # Contorno
+        contours, _ = cv2.findContours(mask_resized.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(frame, contours, -1, (0, 200, 0), 2)
+        return frame
+
+    def draw_label_box(self, frame, x, y, text):
+        """
+        Desenha uma pequena caixa de rótulo no canto superior da região indicada.
+        """
+        color_bgr = (0, 255, 0)
+        text_size, _ = cv2.getTextSize(text, self.font, self.font_scale, self.font_thickness)
         text_width, text_height = text_size
-        
-        # Fundo para o texto na parte inferior
-        cv2.rectangle(
-            frame, 
-            (x1, y2 - text_height - 5), 
-            (x1 + text_width, y2), 
-            color_bgr, 
-            -1
-        )
-        
-        # Texto na parte inferior
-        cv2.putText(
-            frame, 
-            label_text, 
-            (x1, y2 - 5), 
-            self.font, 
-            self.font_scale, 
-            (0, 0, 0),
-            self.font_thickness
-        )
-        
+        x2 = x + text_width + 6
+        y2 = y + text_height + 8
+        x = max(0, x)
+        y = max(0, y)
+        x2 = min(frame.shape[1] - 1, x2)
+        y2 = min(frame.shape[0] - 1, y2)
+        cv2.rectangle(frame, (x, y), (x2, y2), color_bgr, -1)
+        cv2.putText(frame, text, (x + 3, y + text_height + 1), self.font, self.font_scale, (0, 0, 0), self.font_thickness)
         return frame
     
     def calculate_area(self, bbox):
@@ -398,7 +503,6 @@ class DetectionProcessor:
         Agora também verifica a data de referência.
         """
         current_time = time.time()
-        current_date = datetime.now().date()
         dishes_to_remove = []
         
         with self.max_areas_lock:
@@ -468,24 +572,74 @@ class DetectionProcessor:
         Exibe a última porcentagem conhecida para cada prato.
         """
         annotated_frame = frame.copy()
+        # Desenha apenas UM rótulo por prato, usando união de caixas
+        label_boxes_by_name = {}
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
-            confidence = boxes.conf[i].item()
             class_id = int(boxes.cls[i].item())
             original_class_name = class_names[class_id]
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
 
-            # Usar a última porcentagem conhecida, ou 0% se não houver
-            percentage = last_percentages.get(dish_name, 0.0)
-            label_text = f"{dish_name} (Total: {percentage:.1%})"
+            if dish_name not in label_boxes_by_name:
+                label_boxes_by_name[dish_name] = bbox.copy()
+            else:
+                x1, y1, x2, y2 = label_boxes_by_name[dish_name]
+                nx1, ny1, nx2, ny2 = bbox
+                label_boxes_by_name[dish_name] = np.array([
+                    min(x1, nx1), min(y1, ny1), max(x2, nx2), max(y2, ny2)
+                ])
 
-            annotated_frame = self.draw_detection(
-                frame=annotated_frame,
-                label_text=label_text,
-                color_key=original_class_name,
-                confidence=confidence,
-                bbox=bbox
-            )
+        for dish_name, bbox in label_boxes_by_name.items():
+            percentage = last_percentages.get(dish_name, 0.0)
+            label_text = f"{dish_name} ({percentage:.0%})"
+            x1, y1, x2, y2 = map(int, bbox)
+            annotated_frame = self.draw_label_box(annotated_frame, x1, y1, label_text)
+
+        return annotated_frame
+
+    def draw_persistent_masks(self, frame, boxes, masks, class_names, camera_id, last_percentages):
+        """
+        Desenha overlays de máscaras e UM rótulo por prato usando últimas porcentagens.
+        """
+        annotated_frame = frame.copy()
+        have_masks = hasattr(masks, 'data') and masks is not None
+        mask_data = None
+        if have_masks:
+            try:
+                mask_data = masks.data.cpu().numpy()
+            except Exception:
+                mask_data = None
+                have_masks = False
+
+        label_boxes_by_name = {}
+        for i in range(len(boxes)):
+            bbox = boxes.xyxy[i].cpu().numpy()
+            class_id = int(boxes.cls[i].item())
+            original_class_name = class_names[class_id]
+            dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+
+            if have_masks and mask_data is not None and i < len(mask_data):
+                instance_mask = (mask_data[i] >= 0.5).astype(np.uint8)
+                annotated_frame = self.draw_mask_overlay(annotated_frame, instance_mask)
+            else:
+                x1, y1, x2, y2 = map(int, bbox)
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            if dish_name not in label_boxes_by_name:
+                label_boxes_by_name[dish_name] = bbox.copy()
+            else:
+                x1, y1, x2, y2 = label_boxes_by_name[dish_name]
+                nx1, ny1, nx2, ny2 = bbox
+                label_boxes_by_name[dish_name] = np.array([
+                    min(x1, nx1), min(y1, ny1), max(x2, nx2), max(y2, ny2)
+                ])
+
+        for dish_name, bbox in label_boxes_by_name.items():
+            percentage = last_percentages.get(dish_name, 0.0)
+            label_text = f"{dish_name} ({percentage:.0%})"
+            x1, y1, x2, y2 = map(int, bbox)
+            annotated_frame = self.draw_label_box(annotated_frame, x1, y1, label_text)
+
         return annotated_frame
 
     def reset_daily_data(self):
