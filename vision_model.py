@@ -16,7 +16,7 @@ class YOLOProcessor:
     Classe responsável por carregar e gerenciar o modelo YOLOv11x para detecção de objetos.
     """
     
-    def __init__(self, model_path="models/FVBM.pt", use_cuda=False, conf_threshold=0.5, iou_threshold=0.45, retina_masks=True):
+    def __init__(self, model_path="models/FVBM.pt", use_cuda=True, conf_threshold=0.5, iou_threshold=0.45, retina_masks=True):
         """
         Inicializa o processador YOLO.
         
@@ -92,11 +92,17 @@ class YOLOProcessor:
             Os resultados da detecção do modelo.
         """
         if self.model:
-            # Ativa máscaras retina para segmentação em resolução do frame
             try:
-                return self.model(frame, verbose=False, retina_masks=self.retina_masks)
+                device_arg = 0 if (self.device and self.device.type == "cuda") else "cpu"
+                return self.model(
+                    frame,
+                    device=device_arg,
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    verbose=False,
+                    retina_masks=self.retina_masks
+                )
             except TypeError:
-                # Compatibilidade caso a versão da lib não aceite o parâmetro
                 return self.model(frame, verbose=False)
         self.logger.warning("Modelo de visão não está carregado. Retornando None.")
         return None
