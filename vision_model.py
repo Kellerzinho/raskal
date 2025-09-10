@@ -9,6 +9,8 @@ Responsável por implementar e configurar o modelo YOLOv11x pré-treinado.
 import logging
 from pathlib import Path
 import torch
+import os
+import sys
 
 
 class YOLOProcessor:
@@ -51,13 +53,32 @@ class YOLOProcessor:
                 self.logger.error(f"Arquivo do modelo não encontrado: {self.model_path}")
                 raise FileNotFoundError(f"Modelo não encontrado: {self.model_path}")
             
-            # Configurar dispositivo
-            if self.use_cuda and torch.cuda.is_available():
+            # Forçar visibilidade de GPU (equivalente ao script que funciona)
+            if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+            # Logs detalhados do ambiente
+            self.logger.info(
+                "Ambiente: Python=%s | torch=%s | torch_cuda=%s | cuda_available=%s | CUDA_VISIBLE_DEVICES=%s",
+                sys.executable,
+                torch.__version__,
+                getattr(torch.version, "cuda", None),
+                torch.cuda.is_available(),
+                os.environ.get("CUDA_VISIBLE_DEVICES")
+            )
+
+            # Configurar dispositivo com checagem rígida
+            if self.use_cuda:
+                if not torch.cuda.is_available():
+                    raise RuntimeError(
+                        "CUDA não disponível no ambiente atual, mas use_cuda=True. "
+                        f"Python={sys.executable} torch={torch.__version__} cuda={getattr(torch.version,'cuda',None)}"
+                    )
                 self.device = torch.device("cuda:0")
                 self.logger.info(f"Utilizando GPU: {torch.cuda.get_device_name(0)}")
             else:
                 self.device = torch.device("cpu")
-                self.logger.info("Utilizando CPU para inferência")
+                self.logger.info("Utilizando CPU para inferência por configuração")
             
             # Carregar modelo
             try:
@@ -71,6 +92,14 @@ class YOLOProcessor:
                     self.model = torch.load(self.model_path, map_location=self.device)
                     self.logger.info("Modelo carregado via PyTorch nativo")
                 
+                # Mover modelo para o dispositivo escolhido (compatível com YOLO Ultralytics e PyTorch)
+                try:
+                    if self.device and hasattr(self.model, "to"):
+                        self.model.to(self.device)
+                        self.logger.info(f"Modelo movido para dispositivo: {self.device}")
+                except Exception as move_err:
+                    self.logger.warning(f"Não foi possível mover o modelo para {self.device}: {move_err}")
+
                 self.logger.info("Modelo YOLOv11x carregado com sucesso")
                 
             except Exception as e:
@@ -94,14 +123,18 @@ class YOLOProcessor:
         if self.model:
             try:
                 device_arg = 0 if (self.device and self.device.type == "cuda") else "cpu"
-                return self.model(
-                    frame,
-                    device=device_arg,
-                    conf=self.conf_threshold,
-                    iou=self.iou_threshold,
-                    verbose=False,
-                    retina_masks=self.retina_masks
-                )
+                # Preferir API explícita predict do Ultralytics quando disponível
+                if hasattr(self.model, "predict"):
+                    return self.model.predict(
+                        frame,
+                        device=device_arg,
+                        conf=self.conf_threshold,
+                        iou=self.iou_threshold,
+                        verbose=False,
+                        retina_masks=self.retina_masks
+                    )
+                # Fallback: chamar o modelo diretamente
+                return self.model(frame, verbose=False)
             except TypeError:
                 return self.model(frame, verbose=False)
         self.logger.warning("Modelo de visão não está carregado. Retornando None.")
