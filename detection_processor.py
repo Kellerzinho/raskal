@@ -67,6 +67,12 @@ class DetectionProcessor:
         # Data de referência para reset diário
         self.current_date = datetime.now().date()
         
+        # Estado para filtro/atraso de mudança de porcentagem por prato
+        self.percentage_state = {}  # { dish_name: { 'confirmed': float, 'pending': { 'start_time': float, 'initial': float, 'latest': float }|None } }
+        self.percentage_state_lock = Lock()
+        self.change_delay_seconds = 10.0  # atraso para confirmar mudança
+        self.change_threshold = 0.05      # 5% de limiar
+        
         self._init_data_file()
         
         self.logger.debug("DetectionProcessor inicializado com consolidação de área máxima")
@@ -224,7 +230,7 @@ class DetectionProcessor:
                 if not has_calibration:
                     continue
 
-                area_percentage = self.update_consolidated_max_area(dish_name, camera_id, 0)
+                area_percentage = self.update_consolidated_max_area(dish_name, camera_id, 0, force_immediate=True)
                 # Grava se esta câmera for a melhor para o prato (pode ou não gravar, conforme regra global)
                 self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
                 stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
@@ -328,14 +334,15 @@ class DetectionProcessor:
         height = abs(y2 - y1)
         return width * height
     
-    def update_consolidated_max_area(self, dish_name, camera_id, current_area):
+    def update_consolidated_max_area(self, dish_name, camera_id, current_area, force_immediate=False):
         """
         Atualiza a área máxima consolidada para um prato e retorna a porcentagem atual.
         Agora inclui verificação de data para reset diário.
         """
-        percentage = 1.0
+        raw_percentage = 1.0
         current_date = datetime.now().date()
         
+        reset_percent_state = False
         with self.max_areas_lock:
             # Verifica se precisa resetar as áreas máximas
             if current_date != self.current_date:
@@ -343,6 +350,7 @@ class DetectionProcessor:
                 self.max_areas.clear()
                 self.current_date = current_date
                 self.logger.info(f"Áreas máximas resetadas. Nova data de referência: {self.current_date}")
+                reset_percent_state = True
             
             if dish_name not in self.max_areas:
                 self.max_areas[dish_name] = {
@@ -351,7 +359,7 @@ class DetectionProcessor:
                     'last_seen': time.time(),
                     'reference_date': current_date
                 }
-                percentage = 1.0
+                raw_percentage = 1.0
                 self.logger.debug(f"Novo prato registrado: {dish_name} (área: {current_area})")
             else:
                 self.max_areas[dish_name]['last_seen'] = time.time()
@@ -359,20 +367,87 @@ class DetectionProcessor:
                 
                 if current_area > current_max:
                     self.max_areas[dish_name]['max_area'] = current_area
-                    percentage = 1.0
+                    raw_percentage = 1.0
                     self.logger.debug(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
                 else:
-                    percentage = current_area / current_max if current_max > 0 else 1.0
+                    raw_percentage = current_area / current_max if current_max > 0 else 1.0
+        
+        # Se houve reset diário, limpar também o estado de porcentagens confirmadas
+        if reset_percent_state:
+            with self.percentage_state_lock:
+                self.percentage_state.clear()
+
+        # Aplicar filtro de atraso/limiar na porcentagem
+        filtered_percentage = self._filter_percentage(dish_name, raw_percentage, force_immediate=force_immediate)
         
         with self.best_cameras_lock:
-            if dish_name not in self.best_cameras or percentage > self.best_cameras[dish_name]['percentage']:
+            if dish_name not in self.best_cameras or filtered_percentage > self.best_cameras[dish_name]['percentage']:
                 self.best_cameras[dish_name] = {
                     'camera_id': camera_id,
-                    'percentage': percentage,
+                    'percentage': filtered_percentage,
                     'timestamp': time.time()
                 }
         
-        return percentage
+        return filtered_percentage
+
+    def _filter_percentage(self, dish_name, raw_percentage, force_immediate=False):
+        """
+        Aplica atraso de confirmação de 10s e limiar de 5% nas mudanças de porcentagem.
+        Retorna a porcentagem "confirmada" a ser exibida/salva.
+        """
+        now_ts = time.time()
+        with self.percentage_state_lock:
+            state = self.percentage_state.get(dish_name)
+            if state is None:
+                # Primeiro valor observado: confirma imediatamente
+                self.percentage_state[dish_name] = {
+                    'confirmed': float(raw_percentage),
+                    'pending': None
+                }
+                return float(raw_percentage)
+
+            confirmed = state.get('confirmed', 1.0)
+            pending = state.get('pending')
+            delta_from_confirmed = abs(raw_percentage - confirmed)
+
+            # Força confirmação imediata (ex.: ausência -> 0%)
+            if force_immediate:
+                state['confirmed'] = float(raw_percentage)
+                state['pending'] = None
+                return float(state['confirmed'])
+
+            # Se não há pendência e a mudança supera o limiar, inicia janela de confirmação
+            if not pending:
+                if delta_from_confirmed >= self.change_threshold:
+                    state['pending'] = {
+                        'start_time': now_ts,
+                        'initial': float(raw_percentage),
+                        'latest': float(raw_percentage)
+                    }
+                    self.logger.debug(f"Mudança pendente iniciada para {dish_name}: de {confirmed:.3f} -> {raw_percentage:.3f}")
+                # Enquanto não confirmar, mantém confirmado
+                return float(state['confirmed'])
+
+            # Atualiza último valor observado durante a janela
+            pending['latest'] = float(raw_percentage)
+
+            elapsed = now_ts - pending['start_time']
+            if elapsed >= self.change_delay_seconds:
+                diff_window = abs(pending['latest'] - pending['initial'])
+                if diff_window >= self.change_threshold:
+                    # Confirma a mudança para o último valor da janela
+                    state['confirmed'] = float(pending['latest'])
+                    self.logger.debug(
+                        f"Mudança confirmada para {dish_name} após {elapsed:.1f}s: {confirmed:.3f} -> {state['confirmed']:.3f} (Δ={diff_window:.3f})"
+                    )
+                else:
+                    # Desconsidera pequenas oscilações
+                    self.logger.debug(
+                        f"Mudança descartada para {dish_name} após {elapsed:.1f}s: variação {diff_window:.3f} < limiar {self.change_threshold:.3f}"
+                    )
+                state['pending'] = None
+
+            return float(state['confirmed'])
     
     def save_if_best_camera(self, camera_id, dish_name, percentage, original_class_name):
         """
@@ -519,6 +594,13 @@ class DetectionProcessor:
             for dish_name in dishes_to_remove:
                 if dish_name in self.best_cameras:
                     del self.best_cameras[dish_name]
+        
+        # Limpa estado do filtro para os pratos removidos
+        if dishes_to_remove:
+            with self.percentage_state_lock:
+                for dish_name in dishes_to_remove:
+                    if dish_name in self.percentage_state:
+                        del self.percentage_state[dish_name]
                 
         if dishes_to_remove:
             self.logger.debug(f"Removidos {len(dishes_to_remove)} registros antigos")
@@ -661,6 +743,10 @@ class DetectionProcessor:
             # Re-inicializa o cache de áreas máximas
             self.max_areas = {}
             self.logger.info("Cache de áreas máximas foi re-inicializado.")
+
+            # Re-inicializa estado filtrado de porcentagens
+            with self.percentage_state_lock:
+                self.percentage_state = {}
 
             # Cria um arquivo vazio para garantir que ele exista para o próximo ciclo
             try:
