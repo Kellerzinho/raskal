@@ -70,8 +70,7 @@ class DetectionProcessor:
         # Estado para filtro/atraso de mudança de porcentagem por prato
         self.percentage_state = {}  # { dish_name: { 'confirmed': float, 'pending': { 'start_time': float, 'initial': float, 'latest': float }|None } }
         self.percentage_state_lock = Lock()
-        self.change_delay_seconds = 10.0  # atraso para confirmar mudança
-        self.change_threshold = 0.05      # 5% de limiar
+        self.change_delay_seconds = 5.0  # atraso para confirmar mudança
         
         self._init_data_file()
         
@@ -392,7 +391,7 @@ class DetectionProcessor:
 
     def _filter_percentage(self, dish_name, raw_percentage, force_immediate=False):
         """
-        Aplica atraso de confirmação de 10s e limiar de 5% nas mudanças de porcentagem.
+        Aplica apenas atraso de confirmação de 5s nas mudanças de porcentagem.
         Retorna a porcentagem "confirmada" a ser exibida/salva.
         """
         now_ts = time.time()
@@ -408,7 +407,6 @@ class DetectionProcessor:
 
             confirmed = state.get('confirmed', 1.0)
             pending = state.get('pending')
-            delta_from_confirmed = abs(raw_percentage - confirmed)
 
             # Força confirmação imediata (ex.: ausência -> 0%)
             if force_immediate:
@@ -416,9 +414,9 @@ class DetectionProcessor:
                 state['pending'] = None
                 return float(state['confirmed'])
 
-            # Se não há pendência e a mudança supera o limiar, inicia janela de confirmação
+            # Se não há pendência e houve qualquer mudança, inicia janela de confirmação
             if not pending:
-                if delta_from_confirmed >= self.change_threshold:
+                if float(raw_percentage) != float(confirmed):
                     state['pending'] = {
                         'start_time': now_ts,
                         'initial': float(raw_percentage),
@@ -433,18 +431,12 @@ class DetectionProcessor:
 
             elapsed = now_ts - pending['start_time']
             if elapsed >= self.change_delay_seconds:
-                diff_window = abs(pending['latest'] - pending['initial'])
-                if diff_window >= self.change_threshold:
-                    # Confirma a mudança para o último valor da janela
-                    state['confirmed'] = float(pending['latest'])
-                    self.logger.debug(
-                        f"Mudança confirmada para {dish_name} após {elapsed:.1f}s: {confirmed:.3f} -> {state['confirmed']:.3f} (Δ={diff_window:.3f})"
-                    )
-                else:
-                    # Desconsidera pequenas oscilações
-                    self.logger.debug(
-                        f"Mudança descartada para {dish_name} após {elapsed:.1f}s: variação {diff_window:.3f} < limiar {self.change_threshold:.3f}"
-                    )
+                previous_confirmed = state['confirmed']
+                # Confirma a mudança para o último valor observado na janela
+                state['confirmed'] = float(pending['latest'])
+                self.logger.debug(
+                    f"Mudança confirmada para {dish_name} após {elapsed:.1f}s: {previous_confirmed:.3f} -> {state['confirmed']:.3f}"
+                )
                 state['pending'] = None
 
             return float(state['confirmed'])
