@@ -136,6 +136,7 @@ class DetectionProcessor:
                 have_masks = False
 
         detected_original_names = set()
+        detected_translated_names = set()
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             confidence = boxes.conf[i].item()
@@ -174,6 +175,7 @@ class DetectionProcessor:
 
             # Estatísticas por nome traduzido
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+            detected_translated_names.add(dish_name)
             stats['classes'].setdefault(dish_name, 0)
             stats['classes'][dish_name] += 1
 
@@ -223,6 +225,9 @@ class DetectionProcessor:
             absent_original_names = self._get_absent_known_originals(camera_id, detected_original_names)
             for original_class_name in absent_original_names:
                 dish_name = self.dish_name_replacer.get_replacement(original_class_name)
+                # Se algum alias deste prato foi detectado, não forçar 0%
+                if dish_name in detected_translated_names:
+                    continue
                 # Só atualiza se já temos calibração (evita criar max_area=0)
                 with self.max_areas_lock:
                     has_calibration = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
