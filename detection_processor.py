@@ -357,6 +357,8 @@ class DetectionProcessor:
         """
         Atualiza a área máxima consolidada para um prato e retorna a porcentagem atual.
         Agora inclui verificação de data para reset diário.
+        Quando existir área máxima configurada no JSON, usa-a diretamente
+        (porcentagem = min(1.0, area_atual / area_max_configurada)).
         """
         raw_percentage = 1.0
         current_date = datetime.now().date()
@@ -371,25 +373,32 @@ class DetectionProcessor:
                 self.logger.info(f"Áreas máximas resetadas. Nova data de referência: {self.current_date}")
                 reset_percent_state = True
             
-            if dish_name not in self.max_areas:
-                self.max_areas[dish_name] = {
-                    'max_area': current_area,
-                    'first_seen': time.time(),
-                    'last_seen': time.time(),
-                    'reference_date': current_date
-                }
-                raw_percentage = 1.0
-                self.logger.debug(f"Novo prato registrado: {dish_name} (área: {current_area})")
+            # Consulta área máxima configurada (por nome traduzido)
+            configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
+            if isinstance(configured_max, (int, float)) and configured_max > 0:
+                # Usa área máxima fixa e satura em 100%
+                raw_percentage = min(1.0, float(current_area) / float(configured_max))
             else:
-                self.max_areas[dish_name]['last_seen'] = time.time()
-                current_max = self.max_areas[dish_name]['max_area']
-                
-                if current_area > current_max:
-                    self.max_areas[dish_name]['max_area'] = current_area
+                # Fallback para comportamento antigo (auto-calibração)
+                if dish_name not in self.max_areas:
+                    self.max_areas[dish_name] = {
+                        'max_area': current_area,
+                        'first_seen': time.time(),
+                        'last_seen': time.time(),
+                        'reference_date': current_date
+                    }
                     raw_percentage = 1.0
-                    self.logger.debug(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
+                    self.logger.debug(f"Novo prato registrado: {dish_name} (área: {current_area})")
                 else:
-                    raw_percentage = current_area / current_max if current_max > 0 else 1.0
+                    self.max_areas[dish_name]['last_seen'] = time.time()
+                    current_max = self.max_areas[dish_name]['max_area']
+                    
+                    if current_area > current_max:
+                        self.max_areas[dish_name]['max_area'] = current_area
+                        raw_percentage = 1.0
+                        self.logger.debug(f"Nova área máxima global para {dish_name}: {current_area} (câmera {camera_id})")
+                    else:
+                        raw_percentage = current_area / current_max if current_max > 0 else 1.0
         
         # Se houve reset diário, limpar também o estado de porcentagens confirmadas
         if reset_percent_state:
@@ -408,7 +417,7 @@ class DetectionProcessor:
                 }
         
         return filtered_percentage
-
+    
     def _filter_percentage(self, dish_name, raw_percentage, force_immediate=False):
         """
         Aplica apenas atraso de confirmação de 5s nas mudanças de porcentagem.

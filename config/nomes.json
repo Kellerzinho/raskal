@@ -1,6 +1,6 @@
 {
-	"Atum": "atum_selado",
-	"carpaccio": "carpaccio",
-	"parma": "presunto_parma",
-	"presunto": "presunto"
+	"Atum": { "name": "atum_selado", "max_area_px": 46200 },
+	"carpaccio": { "name": "carpaccio", "max_area_px": 96000 },
+	"parma": { "name": "presunto_parma", "max_area_px": 40000 },
+	"presunto": { "name": "presunto", "max_area_px": 60700 }
 }
