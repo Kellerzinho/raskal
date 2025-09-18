@@ -212,7 +212,8 @@ class DetectionProcessor:
             # Desenha UM rótulo por prato, no canto superior da bbox unificada
             if original_class_name in label_boxes_by_original_name:
                 x1, y1, x2, y2 = map(int, label_boxes_by_original_name[original_class_name])
-                label_text = f"{dish_name} ({area_percentage:.0%})"
+                area_display = self._format_area(total_area)
+                label_text = f"{dish_name} ({area_percentage:.0%} | {area_display})"
                 annotated_frame = self.draw_label_box(
                     annotated_frame,
                     x1,
@@ -328,6 +329,20 @@ class DetectionProcessor:
         cv2.rectangle(frame, (x, y), (x2, y2), color_bgr, -1)
         cv2.putText(frame, text, (x + 3, y + text_height + 1), self.font, self.font_scale, (0, 0, 0), self.font_thickness)
         return frame
+
+    def _format_area(self, area_pixels):
+        """
+        Formata a área em pixels para exibição compacta (ex.: 1.5k px, 2.0M px).
+        """
+        try:
+            area = float(area_pixels)
+        except Exception:
+            area = 0.0
+        if area >= 1_000_000:
+            return f"{area/1_000_000:.1f}M px"
+        if area >= 1_000:
+            return f"{area/1_000:.1f}k px"
+        return f"{int(area)} px"
     
     def calculate_area(self, bbox):
         """
@@ -653,6 +668,7 @@ class DetectionProcessor:
         annotated_frame = frame.copy()
         # Desenha apenas UM rótulo por prato, usando união de caixas
         label_boxes_by_name = {}
+        areas_by_name = {}
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             class_id = int(boxes.cls[i].item())
@@ -667,10 +683,13 @@ class DetectionProcessor:
                 label_boxes_by_name[dish_name] = np.array([
                     min(x1, nx1), min(y1, ny1), max(x2, nx2), max(y2, ny2)
                 ])
+            # Acumula área por prato (via bbox)
+            areas_by_name[dish_name] = areas_by_name.get(dish_name, 0) + self.calculate_area(bbox)
 
         for dish_name, bbox in label_boxes_by_name.items():
             percentage = last_percentages.get(dish_name, 0.0)
-            label_text = f"{dish_name} ({percentage:.0%})"
+            area_display = self._format_area(areas_by_name.get(dish_name, 0))
+            label_text = f"{dish_name} ({percentage:.0%} | {area_display})"
             x1, y1, x2, y2 = map(int, bbox)
             annotated_frame = self.draw_label_box(annotated_frame, x1, y1, label_text)
 
@@ -691,6 +710,7 @@ class DetectionProcessor:
                 have_masks = False
 
         label_boxes_by_name = {}
+        areas_by_name = {}
         for i in range(len(boxes)):
             bbox = boxes.xyxy[i].cpu().numpy()
             class_id = int(boxes.cls[i].item())
@@ -700,9 +720,11 @@ class DetectionProcessor:
             if have_masks and mask_data is not None and i < len(mask_data):
                 instance_mask = (mask_data[i] >= 0.5).astype(np.uint8)
                 annotated_frame = self.draw_mask_overlay(annotated_frame, instance_mask)
+                areas_by_name[dish_name] = areas_by_name.get(dish_name, 0) + int(instance_mask.sum())
             else:
                 x1, y1, x2, y2 = map(int, bbox)
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                areas_by_name[dish_name] = areas_by_name.get(dish_name, 0) + self.calculate_area(bbox)
 
             if dish_name not in label_boxes_by_name:
                 label_boxes_by_name[dish_name] = bbox.copy()
@@ -715,7 +737,8 @@ class DetectionProcessor:
 
         for dish_name, bbox in label_boxes_by_name.items():
             percentage = last_percentages.get(dish_name, 0.0)
-            label_text = f"{dish_name} ({percentage:.0%})"
+            area_display = self._format_area(areas_by_name.get(dish_name, 0))
+            label_text = f"{dish_name} ({percentage:.0%} | {area_display})"
             x1, y1, x2, y2 = map(int, bbox)
             annotated_frame = self.draw_label_box(annotated_frame, x1, y1, label_text)
 
