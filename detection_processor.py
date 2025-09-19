@@ -649,7 +649,7 @@ class DetectionProcessor:
                             "percentage_remaining": 0,
                             "needs_reposition": False,
                             "timestamp": "",
-                            "dishe_time_replacement": ""
+                            "dish_time_replacement": ""
                         }
                         location_data["dishes"].append(dish_data)
                     
@@ -657,7 +657,7 @@ class DetectionProcessor:
                     dish_data["percentage_remaining"] = int(percentage * 100)
                     dish_data["needs_reposition"] = (percentage < self.reposition_threshold)
                     dish_data["timestamp"] = datetime.now().isoformat()
-                    dish_data["dishe_time_replacement"] = datetime.now().isoformat()
+                    dish_data["dish_time_replacement"] = datetime.now().isoformat()
                     
                     # Volta ao início do arquivo para sobrescrever
                     f.seek(0)
