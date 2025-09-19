@@ -59,6 +59,9 @@ class DetectionProcessor:
         # Preferência por câmera primária por prato
         self.primary_camera_grace_seconds = 180.0
         self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
+        # Estabilização para envio ao dashboard: impedir quedas bruscas (>20 p.p.)
+        self.max_negative_jump_for_send = 0.20
+        self.last_sent_percentage_by_dish = {}  # {dish_name: float}
         
         self.data_file = "config/buffet_data.json"
         self.data_file_lock = Lock()
@@ -579,7 +582,30 @@ class DetectionProcessor:
                 is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
         
         if is_best_camera:
-            self.save_area_percentage(camera_id, dish_name, percentage, original_class_name)
+            # Aplica estabilização anti-queda antes de enviar/salvar
+            stabilized_percentage = self._stabilize_for_dashboard(dish_name, float(percentage))
+            self.save_area_percentage(camera_id, dish_name, stabilized_percentage, original_class_name)
+
+    def _stabilize_for_dashboard(self, dish_name, new_percentage):
+        """
+        Impede quedas bruscas no valor enviado ao dashboard.
+        Se a nova leitura cair mais que 20 pontos percentuais em relação ao último
+        valor enviado para este prato, mantém o último valor.
+        Aumentos e quedas pequenas são permitidos normalmente.
+        """
+        try:
+            new_val = float(new_percentage)
+        except Exception:
+            return float(self.last_sent_percentage_by_dish.get(dish_name, 0.0))
+
+        last_val = float(self.last_sent_percentage_by_dish.get(dish_name, new_val))
+        delta = new_val - last_val
+        if delta < -self.max_negative_jump_for_send:
+            # Queda brusca: mantém o último valor
+            return last_val
+        # Atualiza e permite envio
+        self.last_sent_percentage_by_dish[dish_name] = new_val
+        return new_val
     
     def save_area_percentage(self, camera_id, dish_name, percentage, original_class_name):
         """
