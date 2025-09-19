@@ -47,12 +47,12 @@ class DetectionProcessor:
         self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
         self.best_cameras_lock = Lock()
         # Estabilização de prioridade entre câmeras (histerese)
-        self.best_camera_margin = 0.05  # requer vantagem mínima de 5 p.p. para trocar
-        self.best_camera_min_hold_seconds = 5.0  # vantagem deve se manter por 5s
+        self.best_camera_margin = 0.12  # requer vantagem mínima de 5 p.p. para trocar
+        self.best_camera_min_hold_seconds = 10.0  # vantagem deve se manter por 5s
         self.best_camera_pending = {}  # { dish_name: { 'camera_id': str, 'start_time': float } }
         # Suavização e cooldown adicional
-        self.ema_alpha = 0.3  # suavização exponencial para porcentagem por câmera
-        self.best_camera_cooldown_seconds = 15.0  # tempo mínimo entre trocas efetivas
+        self.ema_alpha = 0.15  # suavização exponencial para porcentagem por câmera
+        self.best_camera_cooldown_seconds = 30.0  # tempo mínimo entre trocas efetivas
         self.camera_percentage_ema = {}  # {(dish_name, camera_id): ema}
         
         self.data_file = "config/buffet_data.json"
@@ -78,7 +78,7 @@ class DetectionProcessor:
         # Estado para filtro/atraso de mudança de porcentagem por prato
         self.percentage_state = {}  # { dish_name: { 'confirmed': float, 'pending': { 'start_time': float, 'initial': float, 'latest': float }|None } }
         self.percentage_state_lock = Lock()
-        self.change_delay_seconds = 5.0  # atraso para confirmar mudança
+        self.change_delay_seconds = 10.0  # atraso para confirmar mudança
         
         self._init_data_file()
         
