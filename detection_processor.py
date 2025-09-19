@@ -54,6 +54,8 @@ class DetectionProcessor:
         self.ema_alpha = 0.15  # suavização exponencial para porcentagem por câmera
         self.best_camera_cooldown_seconds = 45.0  # tempo mínimo entre trocas efetivas
         self.camera_percentage_ema = {}  # {(dish_name, camera_id): ema}
+        # Piso mínimo para permitir troca de câmera (EMA deve ser >= 60%)
+        self.min_switch_percentage = 0.60
         # Preferência por câmera primária por prato
         self.primary_camera_grace_seconds = 180.0
         self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
@@ -494,7 +496,7 @@ class DetectionProcessor:
                     else:
                         advantage = ema_val - float(best_ema)
                         pending = self.best_camera_pending.get(dish_name)
-                        if advantage >= self.best_camera_margin:
+                        if advantage >= self.best_camera_margin and ema_val >= self.min_switch_percentage:
                             if not pending or pending.get('camera_id') != camera_id:
                                 self.best_camera_pending[dish_name] = {
                                     'camera_id': camera_id,
