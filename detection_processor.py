@@ -47,15 +47,15 @@ class DetectionProcessor:
         self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
         self.best_cameras_lock = Lock()
         # Estabilização de prioridade entre câmeras (histerese)
-        self.best_camera_margin = 0.12  # requer vantagem mínima de 5 p.p. para trocar
-        self.best_camera_min_hold_seconds = 10.0  # vantagem deve se manter por 5s
+        self.best_camera_margin = 0.50  # requer vantagem mínima de 5 p.p. para trocar
+        self.best_camera_min_hold_seconds = 15.0  # vantagem deve se manter por 5s
         self.best_camera_pending = {}  # { dish_name: { 'camera_id': str, 'start_time': float } }
         # Suavização e cooldown adicional
         self.ema_alpha = 0.15  # suavização exponencial para porcentagem por câmera
-        self.best_camera_cooldown_seconds = 30.0  # tempo mínimo entre trocas efetivas
+        self.best_camera_cooldown_seconds = 45.0  # tempo mínimo entre trocas efetivas
         self.camera_percentage_ema = {}  # {(dish_name, camera_id): ema}
         # Preferência por câmera primária por prato
-        self.primary_camera_grace_seconds = 120.0
+        self.primary_camera_grace_seconds = 180.0
         self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
         
         self.data_file = "config/buffet_data.json"
@@ -81,7 +81,9 @@ class DetectionProcessor:
         # Estado para filtro/atraso de mudança de porcentagem por prato
         self.percentage_state = {}  # { dish_name: { 'confirmed': float, 'pending': { 'start_time': float, 'initial': float, 'latest': float }|None } }
         self.percentage_state_lock = Lock()
-        self.change_delay_seconds = 10.0  # atraso para confirmar mudança
+        self.change_delay_seconds = 30.0  # atraso para confirmar mudança
+        # Limite para marcar necessidade de reposição (40%)
+        self.reposition_threshold = 0.4
         
         self._init_data_file()
         
@@ -197,14 +199,17 @@ class DetectionProcessor:
 
             # Porcentagem instantânea por câmera (sem filtro), baseada na área máxima configurada
             configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
-            if isinstance(configured_max, (int, float)) and configured_max > 0:
-                instant_percentage = min(1.0, float(total_area) / float(configured_max))
-            else:
+            with self.max_areas_lock:
+                has_dynamic = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
+            if not (isinstance(configured_max, (int, float)) and configured_max > 0 or has_dynamic):
                 # Fallback dinâmico simples: usa max atual se existir
-                with self.max_areas_lock:
-                    current_max = self.max_areas.get(dish_name, {}).get('max_area', 0)
+                current_max = self.max_areas.get(dish_name, {}).get('max_area', 0)
                 instant_percentage = 1.0 if current_max <= 0 else float(total_area) / float(current_max)
                 instant_percentage = max(0.0, min(1.0, instant_percentage))
+            else:
+                # Usa área máxima fixa e satura em 100%
+                raw_percentage = min(1.0, float(total_area) / float(configured_max))
+                instant_percentage = raw_percentage
 
             # A área máxima consolidada/histerese continua sendo atualizada para persistência/"melhor câmera"
             area_percentage_filtered = self.update_consolidated_max_area(dish_name, camera_id, total_area)
@@ -215,7 +220,7 @@ class DetectionProcessor:
             # Atualiza estatísticas com o valor filtrado (para persistência entre frames)
             stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage_filtered
             
-            if area_percentage_filtered < 0.3:
+            if area_percentage_filtered < self.reposition_threshold:
                 stats['needs_refill'].append({
                     'id': f"{camera_id}_{original_class_name}", 
                     'class': dish_name, 
@@ -252,16 +257,17 @@ class DetectionProcessor:
                 if dish_name in detected_translated_names:
                     continue
                 # Só atualiza se já temos calibração (evita criar max_area=0)
+                configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
                 with self.max_areas_lock:
-                    has_calibration = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
-                if not has_calibration:
+                    has_dynamic = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
+                if not (isinstance(configured_max, (int, float)) and configured_max > 0 or has_dynamic):
                     continue
 
                 area_percentage = self.update_consolidated_max_area(dish_name, camera_id, 0, force_immediate=True)
                 # Grava se esta câmera for a melhor para o prato (pode ou não gravar, conforme regra global)
                 self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
                 stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
-                if area_percentage < 0.3:
+                if area_percentage < self.reposition_threshold:
                     stats['needs_refill'].append({
                         'id': f"{camera_id}_{original_class_name}",
                         'class': dish_name,
@@ -614,14 +620,16 @@ class DetectionProcessor:
                             "dish_name": dish_name,
                             "percentage_remaining": 0,
                             "needs_reposition": False,
-                            "timestamp": ""
+                            "timestamp": "",
+                            "dishe_time_replacement": ""
                         }
                         location_data["dishes"].append(dish_data)
                     
                     # Atualiza os dados do prato
                     dish_data["percentage_remaining"] = int(percentage * 100)
-                    dish_data["needs_reposition"] = "true" if percentage < 0.3 else "false" # Convertido para string
+                    dish_data["needs_reposition"] = (percentage < self.reposition_threshold)
                     dish_data["timestamp"] = datetime.now().isoformat()
+                    dish_data["dishe_time_replacement"] = datetime.now().isoformat()
                     
                     # Volta ao início do arquivo para sobrescrever
                     f.seek(0)
