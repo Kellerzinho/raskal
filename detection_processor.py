@@ -54,6 +54,9 @@ class DetectionProcessor:
         self.ema_alpha = 0.15  # suavização exponencial para porcentagem por câmera
         self.best_camera_cooldown_seconds = 30.0  # tempo mínimo entre trocas efetivas
         self.camera_percentage_ema = {}  # {(dish_name, camera_id): ema}
+        # Preferência por câmera primária por prato
+        self.primary_camera_grace_seconds = 120.0
+        self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
         
         self.data_file = "config/buffet_data.json"
         self.data_file_lock = Lock()
@@ -424,11 +427,14 @@ class DetectionProcessor:
             with self.percentage_state_lock:
                 self.percentage_state.clear()
 
+        # Atualiza last_seen por prato/câmera
+        now_ts = time.time()
+        self.last_seen_by_dish_cam[(dish_name, camera_id)] = now_ts
+
         # Aplicar filtro de atraso/limiar na porcentagem
         filtered_percentage = self._filter_percentage(dish_name, raw_percentage, force_immediate=force_immediate)
         
         with self.best_cameras_lock:
-            now_ts = time.time()
             # Atualiza EMA desta câmera/prato
             ema_key = (dish_name, camera_id)
             prev_ema = self.camera_percentage_ema.get(ema_key, filtered_percentage)
@@ -436,6 +442,27 @@ class DetectionProcessor:
             self.camera_percentage_ema[ema_key] = ema_val
 
             current_best = self.best_cameras.get(dish_name)
+
+            # Preferência por câmera primária (se vista recentemente)
+            primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
+            if isinstance(primary_cam, str) and primary_cam:
+                last_seen_primary = self.last_seen_by_dish_cam.get((dish_name, primary_cam), 0.0)
+                if (now_ts - last_seen_primary) <= self.primary_camera_grace_seconds:
+                    # Força a melhor câmera para a primária enquanto ela estiver recente
+                    primary_ema = self.camera_percentage_ema.get((dish_name, primary_cam))
+                    if primary_ema is None:
+                        # Fallback: se ainda não temos EMA da primária, mantém best atual
+                        primary_ema = filtered_percentage if camera_id == primary_cam else ema_val
+                    self.best_cameras[dish_name] = {
+                        'camera_id': primary_cam,
+                        'percentage': primary_ema,
+                        'timestamp': now_ts
+                    }
+                    # Limpa pendências de troca
+                    if dish_name in self.best_camera_pending:
+                        del self.best_camera_pending[dish_name]
+                    return filtered_percentage
+
             if current_best is None:
                 self.best_cameras[dish_name] = {
                     'camera_id': camera_id,
