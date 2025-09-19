@@ -188,20 +188,31 @@ class DetectionProcessor:
             # Nome traduzido para lógicas de negócio (área máxima, etc.)
             dish_name = self.dish_name_replacer.get_replacement(original_class_name)
 
-            # A área máxima é consolidada com base no nome TRADUZIDO.
-            area_percentage = self.update_consolidated_max_area(dish_name, camera_id, total_area)
+            # Porcentagem instantânea por câmera (sem filtro), baseada na área máxima configurada
+            configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
+            if isinstance(configured_max, (int, float)) and configured_max > 0:
+                instant_percentage = min(1.0, float(total_area) / float(configured_max))
+            else:
+                # Fallback dinâmico simples: usa max atual se existir
+                with self.max_areas_lock:
+                    current_max = self.max_areas.get(dish_name, {}).get('max_area', 0)
+                instant_percentage = 1.0 if current_max <= 0 else float(total_area) / float(current_max)
+                instant_percentage = max(0.0, min(1.0, instant_percentage))
+
+            # A área máxima consolidada/histerese continua sendo atualizada para persistência/"melhor câmera"
+            area_percentage_filtered = self.update_consolidated_max_area(dish_name, camera_id, total_area)
             
             # Salva os dados consolidados se for a melhor câmera, passando o nome original
-            self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
+            self.save_if_best_camera(camera_id, dish_name, area_percentage_filtered, original_class_name)
 
-            # Atualiza estatísticas
-            stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
+            # Atualiza estatísticas com o valor filtrado (para persistência entre frames)
+            stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage_filtered
             
-            if area_percentage < 0.3:
+            if area_percentage_filtered < 0.3:
                 stats['needs_refill'].append({
                     'id': f"{camera_id}_{original_class_name}", 
                     'class': dish_name, 
-                    'percentage': area_percentage
+                    'percentage': area_percentage_filtered
                 })
 
             # Desenha overlays das máscaras/caixas por detecção
@@ -217,7 +228,7 @@ class DetectionProcessor:
             if original_class_name in label_boxes_by_original_name:
                 x1, y1, x2, y2 = map(int, label_boxes_by_original_name[original_class_name])
                 area_display = self._format_area(total_area)
-                label_text = f"{dish_name} ({area_percentage:.0%} | {area_display})"
+                label_text = f"{dish_name} ({instant_percentage:.0%} | {area_display})"
                 annotated_frame = self.draw_label_box(
                     annotated_frame,
                     x1,
