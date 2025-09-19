@@ -46,6 +46,10 @@ class DetectionProcessor:
         
         self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
         self.best_cameras_lock = Lock()
+        # Estabilização de prioridade entre câmeras (histerese)
+        self.best_camera_margin = 0.05  # requer vantagem mínima de 5 p.p. para trocar
+        self.best_camera_min_hold_seconds = 5.0  # vantagem deve se manter por 5s
+        self.best_camera_pending = {}  # { dish_name: { 'camera_id': str, 'start_time': float } }
         
         self.data_file = "config/buffet_data.json"
         self.data_file_lock = Lock()
@@ -409,12 +413,51 @@ class DetectionProcessor:
         filtered_percentage = self._filter_percentage(dish_name, raw_percentage, force_immediate=force_immediate)
         
         with self.best_cameras_lock:
-            if dish_name not in self.best_cameras or filtered_percentage > self.best_cameras[dish_name]['percentage']:
+            now_ts = time.time()
+            current_best = self.best_cameras.get(dish_name)
+            if current_best is None:
+                # Primeira câmera observada para o prato vira a melhor
                 self.best_cameras[dish_name] = {
                     'camera_id': camera_id,
                     'percentage': filtered_percentage,
-                    'timestamp': time.time()
+                    'timestamp': now_ts
                 }
+                # limpa pendência
+                if dish_name in self.best_camera_pending:
+                    del self.best_camera_pending[dish_name]
+            else:
+                if camera_id == current_best.get('camera_id'):
+                    # Atualiza métricas da melhor atual e limpa pendência
+                    current_best['percentage'] = filtered_percentage
+                    current_best['timestamp'] = now_ts
+                    if dish_name in self.best_camera_pending:
+                        del self.best_camera_pending[dish_name]
+                else:
+                    # Desafiadora: verifica vantagem e janela de hold
+                    advantage = filtered_percentage - float(current_best.get('percentage', 0.0))
+                    pending = self.best_camera_pending.get(dish_name)
+                    if advantage >= self.best_camera_margin:
+                        if not pending or pending.get('camera_id') != camera_id:
+                            # inicia pendência para esta câmera
+                            self.best_camera_pending[dish_name] = {
+                                'camera_id': camera_id,
+                                'start_time': now_ts
+                            }
+                        else:
+                            # já pendente; verifica se manteve vantagem por tempo suficiente
+                            elapsed = now_ts - float(pending.get('start_time', now_ts))
+                            if elapsed >= self.best_camera_min_hold_seconds:
+                                # troca a melhor câmera
+                                self.best_cameras[dish_name] = {
+                                    'camera_id': camera_id,
+                                    'percentage': filtered_percentage,
+                                    'timestamp': now_ts
+                                }
+                                del self.best_camera_pending[dish_name]
+                    else:
+                        # vantagem insuficiente: cancela pendência se for deste desafiante
+                        if pending and pending.get('camera_id') == camera_id:
+                            del self.best_camera_pending[dish_name]
         
         return filtered_percentage
     
