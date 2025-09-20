@@ -59,8 +59,8 @@ class DetectionProcessor:
         # Preferência por câmera primária por prato
         self.primary_camera_grace_seconds = 180.0
         self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
-        # Estabilização para envio ao dashboard: impedir quedas bruscas (>20 p.p.)
-        self.max_negative_jump_for_send = 0.20
+        # Estabilização para envio ao dashboard: impedir quedas bruscas (>30 p.p.)
+        self.max_negative_jump_for_send = 0.30
         self.last_sent_percentage_by_dish = {}  # {dish_name: float}
         
         self.data_file = "config/buffet_data.json"
@@ -584,12 +584,18 @@ class DetectionProcessor:
         if is_best_camera:
             # Aplica estabilização anti-queda antes de enviar/salvar
             stabilized_percentage = self._stabilize_for_dashboard(dish_name, float(percentage))
-            self.save_area_percentage(camera_id, dish_name, stabilized_percentage, original_class_name)
+            self.save_area_percentage(
+                camera_id,
+                dish_name,
+                stabilized_percentage,
+                original_class_name,
+                raw_percentage_for_reposition=percentage
+            )
 
     def _stabilize_for_dashboard(self, dish_name, new_percentage):
         """
         Impede quedas bruscas no valor enviado ao dashboard.
-        Se a nova leitura cair mais que 20 pontos percentuais em relação ao último
+        Se a nova leitura cair mais que 30 pontos percentuais em relação ao último
         valor enviado para este prato, mantém o último valor.
         Aumentos e quedas pequenas são permitidos normalmente.
         """
@@ -607,7 +613,7 @@ class DetectionProcessor:
         self.last_sent_percentage_by_dish[dish_name] = new_val
         return new_val
     
-    def save_area_percentage(self, camera_id, dish_name, percentage, original_class_name):
+    def save_area_percentage(self, camera_id, dish_name, percentage, original_class_name, raw_percentage_for_reposition=None):
         """
         Salva a porcentagem de área de um prato no arquivo JSON, seguindo a estrutura da imagem.
         """
@@ -649,15 +655,19 @@ class DetectionProcessor:
                             "percentage_remaining": 0,
                             "needs_reposition": False,
                             "timestamp": "",
-                            "dish_time_replacement": ""
+                            "dish_time_replacement": "",
+                            "dishe_time_replacement": ""
                         }
                         location_data["dishes"].append(dish_data)
                     
                     # Atualiza os dados do prato
                     dish_data["percentage_remaining"] = int(percentage * 100)
-                    dish_data["needs_reposition"] = (percentage < self.reposition_threshold)
+                    effective_for_reposition = raw_percentage_for_reposition if raw_percentage_for_reposition is not None else percentage
+                    dish_data["needs_reposition"] = (effective_for_reposition < self.reposition_threshold)
                     dish_data["timestamp"] = datetime.now().isoformat()
-                    dish_data["dish_time_replacement"] = datetime.now().isoformat()
+                    replacement_ts = datetime.now().isoformat()
+                    dish_data["dish_time_replacement"] = replacement_ts
+                    dish_data["dishe_time_replacement"] = replacement_ts
                     
                     # Volta ao início do arquivo para sobrescrever
                     f.seek(0)
