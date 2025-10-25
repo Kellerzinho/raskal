@@ -49,6 +49,12 @@ class DetectionProcessor:
         # Estabilização para envio ao dashboard: impedir quedas bruscas (>30 p.p.)
         self.max_negative_jump_for_send = 0.30
         self.last_sent_percentage_by_dish = {}  # {dish_name: float}
+        # Suavização do valor enviado quando |delta| <= 30 p.p.
+        self.send_ema_alpha = 0.35
+        # Degraus só quando valor enviado está estável por 10 minutos
+        self.last_change_time_by_dish = {}  # {dish_name: float}
+        self.step_on_stale_seconds = 600.0  # 10 minutos
+        self.sent_change_epsilon = 0.005  # 0.5 p.p. para considerar mudança real
         
         self.data_file = "config/buffet_data.json"
         self.data_file_lock = Lock()
@@ -542,10 +548,44 @@ class DetectionProcessor:
         last_val = float(self.last_sent_percentage_by_dish.get(dish_name, new_val))
         delta = new_val - last_val
         if delta < -self.max_negative_jump_for_send:
-            # Queda brusca: mantém o último valor
+            # Queda brusca: só aplica degrau se valor enviado está estável há 10 min
+            now_ts = time.time()
+            last_change_ts = self.last_change_time_by_dish.get(dish_name, 0.0)
+            is_stale = (now_ts - last_change_ts) >= self.step_on_stale_seconds
+            if is_stale:
+                clamped = max(new_val, last_val - self.max_negative_jump_for_send)
+                self.last_sent_percentage_by_dish[dish_name] = clamped
+                if abs(clamped - last_val) > self.sent_change_epsilon:
+                    self.last_change_time_by_dish[dish_name] = now_ts
+                return clamped
+            # Não está estável: mantém último valor (sem atualização)
             return last_val
-        # Atualiza e permite envio
+        if delta > self.max_negative_jump_for_send:
+            # Aumento brusco: só aplica degrau se valor enviado está estável há 10 min
+            now_ts = time.time()
+            last_change_ts = self.last_change_time_by_dish.get(dish_name, 0.0)
+            is_stale = (now_ts - last_change_ts) >= self.step_on_stale_seconds
+            if is_stale:
+                stepped = min(new_val, last_val + self.max_negative_jump_for_send)
+                self.last_sent_percentage_by_dish[dish_name] = stepped
+                if abs(stepped - last_val) > self.sent_change_epsilon:
+                    self.last_change_time_by_dish[dish_name] = now_ts
+                return stepped
+            # Não está estável: mantém último valor (sem atualização)
+            return last_val
+        # Dentro de ±30 p.p.: suaviza via EMA para evitar serrilhado
+        if abs(delta) <= self.max_negative_jump_for_send:
+            smoothed = self.send_ema_alpha * new_val + (1.0 - self.send_ema_alpha) * last_val
+            self.last_sent_percentage_by_dish[dish_name] = smoothed
+            now_ts = time.time()
+            if abs(smoothed - last_val) > self.sent_change_epsilon:
+                self.last_change_time_by_dish[dish_name] = now_ts
+            return smoothed
+        # Mudanças acima da faixa mas que não se enquadram nas regras acima
         self.last_sent_percentage_by_dish[dish_name] = new_val
+        now_ts = time.time()
+        if abs(new_val - last_val) > self.sent_change_epsilon:
+            self.last_change_time_by_dish[dish_name] = now_ts
         return new_val
     
     def save_area_percentage(self, camera_id, dish_name, percentage, original_class_name, raw_percentage_for_reposition=None):
