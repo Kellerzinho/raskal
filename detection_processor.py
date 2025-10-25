@@ -3,8 +3,8 @@
 
 """
 Módulo de Processamento - Sistema de Monitoramento de Buffet
-Modificação simples: mesmos pratos de câmeras diferentes compartilham área máxima
-e apenas a câmera com maior porcentagem grava no JSON.
+Consolida área máxima por prato e usa apenas a câmera primária configurada
+para salvar/enviar porcentagens ao dashboard/JSON.
 """
 
 import logging
@@ -44,20 +44,7 @@ class DetectionProcessor:
         self.max_areas = {}  # Chave: dish_name, Valor: dados da área máxima
         self.max_areas_lock = Lock()
         
-        self.best_cameras = {}  # Chave: dish_name, Valor: dados da melhor câmera
-        self.best_cameras_lock = Lock()
-        # Estabilização de prioridade entre câmeras (histerese)
-        self.best_camera_margin = 0.50  # requer vantagem mínima de 5 p.p. para trocar
-        self.best_camera_min_hold_seconds = 15.0  # vantagem deve se manter por 5s
-        self.best_camera_pending = {}  # { dish_name: { 'camera_id': str, 'start_time': float } }
-        # Suavização e cooldown adicional
-        self.ema_alpha = 0.15  # suavização exponencial para porcentagem por câmera
-        self.best_camera_cooldown_seconds = 45.0  # tempo mínimo entre trocas efetivas
-        self.camera_percentage_ema = {}  # {(dish_name, camera_id): ema}
-        # Piso mínimo para permitir troca de câmera (EMA deve ser >= 60%)
-        self.min_switch_percentage = 0.60
-        # Preferência por câmera primária por prato
-        self.primary_camera_grace_seconds = 180.0
+        # Preferência dinâmica de câmeras removida: apenas câmera primária configurada é usada para salvar
         self.last_seen_by_dish_cam = {}  # {(dish_name, camera_id): last_ts}
         # Estabilização para envio ao dashboard: impedir quedas bruscas (>30 p.p.)
         self.max_negative_jump_for_send = 0.30
@@ -87,6 +74,8 @@ class DetectionProcessor:
         self.percentage_state = {}  # { dish_name: { 'confirmed': float, 'pending': { 'start_time': float, 'initial': float, 'latest': float }|None } }
         self.percentage_state_lock = Lock()
         self.change_delay_seconds = 30.0  # atraso para confirmar mudança
+        # Confirma imediatamente variações pequenas (em pontos percentuais, 0.30 = 30 p.p.)
+        self.small_change_threshold = 0.30
         # Limite para marcar necessidade de reposição (40%)
         self.reposition_threshold = 0.4
         
@@ -216,24 +205,11 @@ class DetectionProcessor:
                 raw_percentage = min(1.0, float(total_area) / float(configured_max))
                 instant_percentage = raw_percentage
 
-            # A área máxima consolidada/histerese continua sendo atualizada para persistência/"melhor câmera"
+            # A área máxima consolidada/histerese continua sendo atualizada para persistência
             area_percentage_filtered = self.update_consolidated_max_area(dish_name, camera_id, total_area)
             
-            # Salva os dados consolidados se for a melhor câmera, passando o nome original
+            # Salva os dados consolidados apenas se for a câmera primária configurada
             self.save_if_best_camera(camera_id, dish_name, area_percentage_filtered, original_class_name)
-
-            # Se a câmera atual não é a primária do prato, força 0% na primária
-            try:
-                primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
-                if isinstance(primary_cam, str) and primary_cam and primary_cam != camera_id:
-                    configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
-                    with self.max_areas_lock:
-                        has_dynamic = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
-                    if (isinstance(configured_max, (int, float)) and configured_max > 0) or has_dynamic:
-                        primary_zero = self.update_consolidated_max_area(dish_name, primary_cam, 0, force_immediate=True)
-                        self.save_if_best_camera(primary_cam, dish_name, primary_zero, original_class_name)
-            except Exception:
-                pass
 
             # Atualiza estatísticas com o valor filtrado (para persistência entre frames)
             stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage_filtered
@@ -281,12 +257,11 @@ class DetectionProcessor:
                 if not (isinstance(configured_max, (int, float)) and configured_max > 0 or has_dynamic):
                     continue
 
-                # Força 0% sempre para a câmera primária (se definida). Caso contrário, usa a câmera atual
+                # Força 0% sempre para a câmera primária (se definida); sem primária, usa câmera atual
                 primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
                 target_cam = primary_cam if isinstance(primary_cam, str) and primary_cam else camera_id
 
                 area_percentage = self.update_consolidated_max_area(dish_name, target_cam, 0, force_immediate=True)
-                # Grava somente se for a câmera primária (ou best quando não houver primária)
                 self.save_if_best_camera(target_cam, dish_name, area_percentage, original_class_name)
                 stats['area_percentages'][f"{target_cam}_{dish_name}"] = area_percentage
                 if area_percentage < self.reposition_threshold:
@@ -462,42 +437,13 @@ class DetectionProcessor:
         # Aplicar filtro de atraso/limiar na porcentagem
         filtered_percentage = self._filter_percentage(dish_name, raw_percentage, force_immediate=force_immediate)
         
-        # Simplificar: força melhor câmera a ser sempre a primária quando definida
-        with self.best_cameras_lock:
-            ema_key = (dish_name, camera_id)
-            prev_ema = self.camera_percentage_ema.get(ema_key, filtered_percentage)
-            ema_val = self.ema_alpha * filtered_percentage + (1 - self.ema_alpha) * prev_ema
-            self.camera_percentage_ema[ema_key] = ema_val
-
-            primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
-            if isinstance(primary_cam, str) and primary_cam:
-                primary_ema = self.camera_percentage_ema.get((dish_name, primary_cam), ema_val if camera_id == primary_cam else 0.0)
-                self.best_cameras[dish_name] = {
-                    'camera_id': primary_cam,
-                    'percentage': primary_ema,
-                    'timestamp': now_ts
-                }
-                if dish_name in self.best_camera_pending:
-                    del self.best_camera_pending[dish_name]
-            else:
-                # Sem primária definida, mantém comportamento mínimo: primeira câmera observada
-                current_best = self.best_cameras.get(dish_name)
-                if current_best is None:
-                    self.best_cameras[dish_name] = {
-                        'camera_id': camera_id,
-                        'percentage': ema_val,
-                        'timestamp': now_ts
-                    }
-                else:
-                    if current_best.get('camera_id') == camera_id:
-                        current_best['percentage'] = ema_val
-                        current_best['timestamp'] = now_ts
+        # Preferência dinâmica removida: nada a manter aqui
 
         return filtered_percentage
     
     def _filter_percentage(self, dish_name, raw_percentage, force_immediate=False):
         """
-        Aplica apenas atraso de confirmação de 5s nas mudanças de porcentagem.
+        Aplica confirmação imediata para variações pequenas e atraso para mudanças grandes.
         Retorna a porcentagem "confirmada" a ser exibida/salva.
         """
         now_ts = time.time()
@@ -516,6 +462,16 @@ class DetectionProcessor:
 
             # Força confirmação imediata (ex.: ausência -> 0%)
             if force_immediate:
+                state['confirmed'] = float(raw_percentage)
+                state['pending'] = None
+                return float(state['confirmed'])
+
+            # Confirma imediatamente mudanças pequenas (<= small_change_threshold)
+            try:
+                diff = float(raw_percentage) - float(confirmed)
+            except Exception:
+                diff = 0.0
+            if abs(diff) <= self.small_change_threshold:
                 state['confirmed'] = float(raw_percentage)
                 state['pending'] = None
                 return float(state['confirmed'])
@@ -549,29 +505,22 @@ class DetectionProcessor:
     
     def save_if_best_camera(self, camera_id, dish_name, percentage, original_class_name):
         """
-        Salva os dados apenas se esta câmera é a primária do prato.
+        Usa apenas a câmera primária configurada para salvar; se não houver, salva a atual.
         """
-        is_best_camera = False
-        # Prioriza câmera primária configurada
         primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
-        if isinstance(primary_cam, str) and primary_cam:
-            is_best_camera = (camera_id == primary_cam)
-        else:
-            # fallback para lógica anterior (caso não exista primária definida)
-            with self.best_cameras_lock:
-                if dish_name in self.best_cameras:
-                    is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
-        
-        if is_best_camera:
-            # Aplica estabilização anti-queda antes de enviar/salvar
-            stabilized_percentage = self._stabilize_for_dashboard(dish_name, float(percentage))
-            self.save_area_percentage(
-                camera_id,
-                dish_name,
-                stabilized_percentage,
-                original_class_name,
-                raw_percentage_for_reposition=percentage
-            )
+        target_cam = primary_cam if isinstance(primary_cam, str) and primary_cam else camera_id
+
+        if camera_id != target_cam:
+            return
+
+        stabilized_percentage = self._stabilize_for_dashboard(dish_name, float(percentage))
+        self.save_area_percentage(
+            camera_id,
+            dish_name,
+            stabilized_percentage,
+            original_class_name,
+            raw_percentage_for_reposition=percentage
+        )
 
     def _stabilize_for_dashboard(self, dish_name, new_percentage):
         """
@@ -586,9 +535,9 @@ class DetectionProcessor:
             return float(self.last_sent_percentage_by_dish.get(dish_name, 0.0))
 
         # Permitir sempre envio de 0% (ausência confirmada)
-        #if new_val <= 0.0:
-        #    self.last_sent_percentage_by_dish[dish_name] = 0.0
-        #    return 0.0
+        if new_val <= 0.0:
+            self.last_sent_percentage_by_dish[dish_name] = 0.0
+            return 0.0
 
         last_val = float(self.last_sent_percentage_by_dish.get(dish_name, new_val))
         delta = new_val - last_val
