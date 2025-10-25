@@ -84,6 +84,8 @@ class DetectionProcessor:
         self.small_change_threshold = 0.30
         # Limite para marcar necessidade de reposição (40%)
         self.reposition_threshold = 0.4
+        # Offline: se a câmera primária não reporta há Xs, enviar 0%
+        self.offline_zero_timeout_seconds = 20.0
         
         self._init_data_file()
         
@@ -263,7 +265,7 @@ class DetectionProcessor:
                 if not (isinstance(configured_max, (int, float)) and configured_max > 0 or has_dynamic):
                     continue
 
-                # Força 0% sempre para a câmera primária (se definida); sem primária, usa câmera atual
+                # Força 0% sempre para a câmera primária; se não houver primária, delega ao save_if_best_camera (que envia 0%)
                 primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
                 target_cam = primary_cam if isinstance(primary_cam, str) and primary_cam else camera_id
 
@@ -279,7 +281,57 @@ class DetectionProcessor:
         except Exception as e:
             self.logger.error(f"Falha ao processar ausentes 0%: {e}")
 
+        # Enforça 0% para primárias offline
+        try:
+            self._enforce_zero_for_offline_primaries()
+        except Exception:
+            pass
         return annotated_frame, stats
+
+    def _find_original_by_dish(self, camera_id, dish_name):
+        """
+        Encontra o nome original (do modelo) correspondente a um dish_name salvo no JSON
+        para a câmera dada. Retorna None se não encontrado.
+        """
+        try:
+            data = self.load_area_data(camera_id=camera_id)
+            for restaurant in data.get('address', []):
+                for location in restaurant.get('locations', []):
+                    if location.get('location_id') != camera_id:
+                        continue
+                    for dish in location.get('dishes', []):
+                        if dish.get('dish_name') == dish_name:
+                            dish_id = dish.get('dish_id', '')
+                            if dish_id.startswith(f"{camera_id}_"):
+                                return dish_id[len(f"{camera_id}_"):]
+        except Exception:
+            pass
+        return None
+
+    def _enforce_zero_for_offline_primaries(self):
+        """
+        Para cada prato com câmera primária configurada, se não há atualização
+        há mais que offline_zero_timeout_seconds, envia 0% para a primária.
+        """
+        now_ts = time.time()
+        # Coletar pratos observados (pelas áreas máximas ou last_seen)
+        observed_dishes = set(self.max_areas.keys())
+        for (dish_name, _cam) in self.last_seen_by_dish_cam.keys():
+            observed_dishes.add(dish_name)
+
+        for dish_name in observed_dishes:
+            primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
+            if not (isinstance(primary_cam, str) and primary_cam):
+                # Sem primária definida: a política atual já envia 0% via save_if_best_camera
+                continue
+            last_ts = float(self.last_seen_by_dish_cam.get((dish_name, primary_cam), 0.0))
+            if now_ts - last_ts >= self.offline_zero_timeout_seconds:
+                original_class_name = self._find_original_by_dish(primary_cam, dish_name) or dish_name
+                try:
+                    # Força 0% imediato para a primária
+                    self.save_if_best_camera(primary_cam, dish_name, 0.0, original_class_name)
+                except Exception:
+                    pass
 
     def _get_absent_known_originals(self, camera_id, detected_original_names):
         """
@@ -514,18 +566,21 @@ class DetectionProcessor:
         Usa apenas a câmera primária configurada para salvar; se não houver, salva a atual.
         """
         primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
-        target_cam = primary_cam if isinstance(primary_cam, str) and primary_cam else camera_id
+        # Apenas a câmera primária deve enviar; se não houver primária, envia 0%
+        if isinstance(primary_cam, str) and primary_cam:
+            if camera_id != primary_cam:
+                return
+            target_percentage = float(percentage)
+        else:
+            target_percentage = 0.0
 
-        if camera_id != target_cam:
-            return
-
-        stabilized_percentage = self._stabilize_for_dashboard(dish_name, float(percentage))
+        stabilized_percentage = self._stabilize_for_dashboard(dish_name, target_percentage)
         self.save_area_percentage(
             camera_id,
             dish_name,
             stabilized_percentage,
             original_class_name,
-            raw_percentage_for_reposition=percentage
+            raw_percentage_for_reposition=target_percentage
         )
 
     def _stabilize_for_dashboard(self, dish_name, new_percentage):
@@ -558,19 +613,6 @@ class DetectionProcessor:
                 if abs(clamped - last_val) > self.sent_change_epsilon:
                     self.last_change_time_by_dish[dish_name] = now_ts
                 return clamped
-            # Não está estável: mantém último valor (sem atualização)
-            return last_val
-        if delta > self.max_negative_jump_for_send:
-            # Aumento brusco: só aplica degrau se valor enviado está estável há 10 min
-            now_ts = time.time()
-            last_change_ts = self.last_change_time_by_dish.get(dish_name, 0.0)
-            is_stale = (now_ts - last_change_ts) >= self.step_on_stale_seconds
-            if is_stale:
-                stepped = min(new_val, last_val + self.max_negative_jump_for_send)
-                self.last_sent_percentage_by_dish[dish_name] = stepped
-                if abs(stepped - last_val) > self.sent_change_epsilon:
-                    self.last_change_time_by_dish[dish_name] = now_ts
-                return stepped
             # Não está estável: mantém último valor (sem atualização)
             return last_val
         # Dentro de ±30 p.p.: suaviza via EMA para evitar serrilhado
