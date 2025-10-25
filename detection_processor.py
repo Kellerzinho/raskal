@@ -222,6 +222,19 @@ class DetectionProcessor:
             # Salva os dados consolidados se for a melhor câmera, passando o nome original
             self.save_if_best_camera(camera_id, dish_name, area_percentage_filtered, original_class_name)
 
+            # Se a câmera atual não é a primária do prato, força 0% na primária
+            try:
+                primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
+                if isinstance(primary_cam, str) and primary_cam and primary_cam != camera_id:
+                    configured_max = self.dish_name_replacer.get_max_area_by_translated(dish_name)
+                    with self.max_areas_lock:
+                        has_dynamic = dish_name in self.max_areas and self.max_areas[dish_name].get('max_area', 0) > 0
+                    if (isinstance(configured_max, (int, float)) and configured_max > 0) or has_dynamic:
+                        primary_zero = self.update_consolidated_max_area(dish_name, primary_cam, 0, force_immediate=True)
+                        self.save_if_best_camera(primary_cam, dish_name, primary_zero, original_class_name)
+            except Exception:
+                pass
+
             # Atualiza estatísticas com o valor filtrado (para persistência entre frames)
             stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage_filtered
             
@@ -268,13 +281,17 @@ class DetectionProcessor:
                 if not (isinstance(configured_max, (int, float)) and configured_max > 0 or has_dynamic):
                     continue
 
-                area_percentage = self.update_consolidated_max_area(dish_name, camera_id, 0, force_immediate=True)
-                # Grava se esta câmera for a melhor para o prato (pode ou não gravar, conforme regra global)
-                self.save_if_best_camera(camera_id, dish_name, area_percentage, original_class_name)
-                stats['area_percentages'][f"{camera_id}_{dish_name}"] = area_percentage
+                # Força 0% sempre para a câmera primária (se definida). Caso contrário, usa a câmera atual
+                primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
+                target_cam = primary_cam if isinstance(primary_cam, str) and primary_cam else camera_id
+
+                area_percentage = self.update_consolidated_max_area(dish_name, target_cam, 0, force_immediate=True)
+                # Grava somente se for a câmera primária (ou best quando não houver primária)
+                self.save_if_best_camera(target_cam, dish_name, area_percentage, original_class_name)
+                stats['area_percentages'][f"{target_cam}_{dish_name}"] = area_percentage
                 if area_percentage < self.reposition_threshold:
                     stats['needs_refill'].append({
-                        'id': f"{camera_id}_{original_class_name}",
+                        'id': f"{target_cam}_{original_class_name}",
                         'class': dish_name,
                         'percentage': area_percentage
                     })
@@ -445,78 +462,36 @@ class DetectionProcessor:
         # Aplicar filtro de atraso/limiar na porcentagem
         filtered_percentage = self._filter_percentage(dish_name, raw_percentage, force_immediate=force_immediate)
         
+        # Simplificar: força melhor câmera a ser sempre a primária quando definida
         with self.best_cameras_lock:
-            # Atualiza EMA desta câmera/prato
             ema_key = (dish_name, camera_id)
             prev_ema = self.camera_percentage_ema.get(ema_key, filtered_percentage)
             ema_val = self.ema_alpha * filtered_percentage + (1 - self.ema_alpha) * prev_ema
             self.camera_percentage_ema[ema_key] = ema_val
 
-            current_best = self.best_cameras.get(dish_name)
-
-            # Preferência por câmera primária (se vista recentemente)
             primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
             if isinstance(primary_cam, str) and primary_cam:
-                last_seen_primary = self.last_seen_by_dish_cam.get((dish_name, primary_cam), 0.0)
-                if (now_ts - last_seen_primary) <= self.primary_camera_grace_seconds:
-                    # Força a melhor câmera para a primária enquanto ela estiver recente
-                    primary_ema = self.camera_percentage_ema.get((dish_name, primary_cam))
-                    if primary_ema is None:
-                        # Fallback: se ainda não temos EMA da primária, mantém best atual
-                        primary_ema = filtered_percentage if camera_id == primary_cam else ema_val
-                    self.best_cameras[dish_name] = {
-                        'camera_id': primary_cam,
-                        'percentage': primary_ema,
-                        'timestamp': now_ts
-                    }
-                    # Limpa pendências de troca
-                    if dish_name in self.best_camera_pending:
-                        del self.best_camera_pending[dish_name]
-                    return filtered_percentage
-
-            if current_best is None:
+                primary_ema = self.camera_percentage_ema.get((dish_name, primary_cam), ema_val if camera_id == primary_cam else 0.0)
                 self.best_cameras[dish_name] = {
-                    'camera_id': camera_id,
-                    'percentage': ema_val,
+                    'camera_id': primary_cam,
+                    'percentage': primary_ema,
                     'timestamp': now_ts
                 }
                 if dish_name in self.best_camera_pending:
                     del self.best_camera_pending[dish_name]
             else:
-                best_cam = current_best.get('camera_id')
-                best_ema = self.camera_percentage_ema.get((dish_name, best_cam), current_best.get('percentage', 0.0))
-                if camera_id == best_cam:
-                    # Atualiza EMA armazenada para melhor atual
-                    current_best['percentage'] = best_ema
-                    current_best['timestamp'] = now_ts
-                    if dish_name in self.best_camera_pending:
-                        del self.best_camera_pending[dish_name]
+                # Sem primária definida, mantém comportamento mínimo: primeira câmera observada
+                current_best = self.best_cameras.get(dish_name)
+                if current_best is None:
+                    self.best_cameras[dish_name] = {
+                        'camera_id': camera_id,
+                        'percentage': ema_val,
+                        'timestamp': now_ts
+                    }
                 else:
-                    # Cooldown: evita troca muito frequente
-                    if (now_ts - current_best.get('timestamp', 0.0)) < self.best_camera_cooldown_seconds:
-                        # ainda em cooldown; apenas mantém a melhor atual
-                        pass
-                    else:
-                        advantage = ema_val - float(best_ema)
-                        pending = self.best_camera_pending.get(dish_name)
-                        if advantage >= self.best_camera_margin and ema_val >= self.min_switch_percentage:
-                            if not pending or pending.get('camera_id') != camera_id:
-                                self.best_camera_pending[dish_name] = {
-                                    'camera_id': camera_id,
-                                    'start_time': now_ts
-                                }
-                            else:
-                                elapsed = now_ts - float(pending.get('start_time', now_ts))
-                                if elapsed >= self.best_camera_min_hold_seconds:
-                                    self.best_cameras[dish_name] = {
-                                        'camera_id': camera_id,
-                                        'percentage': ema_val,
-                                        'timestamp': now_ts
-                                    }
-                                    del self.best_camera_pending[dish_name]
-                        else:
-                            if pending and pending.get('camera_id') == camera_id:
-                                del self.best_camera_pending[dish_name]
+                    if current_best.get('camera_id') == camera_id:
+                        current_best['percentage'] = ema_val
+                        current_best['timestamp'] = now_ts
 
         return filtered_percentage
     
@@ -574,12 +549,18 @@ class DetectionProcessor:
     
     def save_if_best_camera(self, camera_id, dish_name, percentage, original_class_name):
         """
-        Salva os dados apenas se esta câmera tem a maior porcentagem para este prato.
+        Salva os dados apenas se esta câmera é a primária do prato.
         """
         is_best_camera = False
-        with self.best_cameras_lock:
-            if dish_name in self.best_cameras:
-                is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
+        # Prioriza câmera primária configurada
+        primary_cam = self.dish_name_replacer.get_primary_camera_by_translated(dish_name)
+        if isinstance(primary_cam, str) and primary_cam:
+            is_best_camera = (camera_id == primary_cam)
+        else:
+            # fallback para lógica anterior (caso não exista primária definida)
+            with self.best_cameras_lock:
+                if dish_name in self.best_cameras:
+                    is_best_camera = self.best_cameras[dish_name]['camera_id'] == camera_id
         
         if is_best_camera:
             # Aplica estabilização anti-queda antes de enviar/salvar
@@ -603,6 +584,11 @@ class DetectionProcessor:
             new_val = float(new_percentage)
         except Exception:
             return float(self.last_sent_percentage_by_dish.get(dish_name, 0.0))
+
+        # Permitir sempre envio de 0% (ausência confirmada)
+        #if new_val <= 0.0:
+        #    self.last_sent_percentage_by_dish[dish_name] = 0.0
+        #    return 0.0
 
         last_val = float(self.last_sent_percentage_by_dish.get(dish_name, new_val))
         delta = new_val - last_val
